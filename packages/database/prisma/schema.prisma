@@ -78,6 +78,7 @@ model Wallet {
   // Relations
   balances        WalletBalance[]
   transactions    Transaction[]
+  payrollBatches  PayrollBatch[]
 
   @@index([userId])
   @@index([publicKey])
@@ -195,4 +196,40 @@ model AuditLog {
   @@index([userId])
   @@index([action])
   @@index([createdAt])
+}
+
+// Payroll batch for managing multiple payroll payouts
+model PayrollBatch {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  walletId    String
+  wallet      Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  status      String   @default("pending") // 'pending', 'approved', 'processing', 'completed', 'failed'
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  items       PayrollItem[]
+
+  @@index([walletId])
+  @@index([status])
+}
+
+// Individual payment item in a payroll batch
+model PayrollItem {
+  id               String       @id @default(cuid())
+  payrollBatchId   String
+  payrollBatch     PayrollBatch @relation(fields: [payrollBatchId], references: [id], onDelete: Cascade)
+  recipientAddress String
+  amount           String
+  assetCode        String
+  assetIssuer      String?
+  memo             String?
+  status           String       @default("pending") // 'pending', 'processing', 'completed', 'failed'
+  stellarTxId      String?
+  errorMessage     String?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([payrollBatchId])
+  @@index([status])
 }
