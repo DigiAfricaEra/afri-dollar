@@ -40,6 +40,7 @@ jest.mock('../../config/database', () => ({
     payrollBatch: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
     },
@@ -59,6 +60,7 @@ const mockWalletFindUnique = prisma.wallet.findUnique as jest.Mock;
 const mockPayrollBatchCreate = prisma.payrollBatch.create as jest.Mock;
 const mockPayrollBatchFindUnique = prisma.payrollBatch.findUnique as jest.Mock;
 const mockPayrollBatchUpdate = prisma.payrollBatch.update as jest.Mock;
+const mockPayrollBatchFindMany = prisma.payrollBatch.findMany as jest.Mock;
 const mockPayrollBatchUpdateMany = prisma.payrollBatch.updateMany as jest.Mock;
 const mockPayrollItemCreate = prisma.payrollItem.create as jest.Mock;
 const mockPayrollItemUpdate = prisma.payrollItem.update as jest.Mock;
@@ -66,6 +68,7 @@ const mockPayrollItemUpdateMany = prisma.payrollItem.updateMany as jest.Mock;
 const mockAuditLogCreate = prisma.auditLog.create as jest.Mock;
 
 describe('PayrollService', () => {
+  const mockUserId = 'user-1';
   const mockWalletId = 'wallet-id-123';
   const testKeypair = Keypair.random();
   const mockPublicKey = testKeypair.publicKey();
@@ -95,7 +98,7 @@ describe('PayrollService', () => {
 
   describe('createPayrollBatch', () => {
     it('should create a batch successfully when the wallet exists', async () => {
-      const mockWallet = { id: mockWalletId, publicKey: mockPublicKey };
+      const mockWallet = { id: mockWalletId, publicKey: mockPublicKey, userId: mockUserId };
       mockWalletFindUnique.mockResolvedValue(mockWallet);
 
       const mockBatch = {
@@ -108,7 +111,7 @@ describe('PayrollService', () => {
 
       const result = await PayrollService.createPayrollBatch(
         { name: 'June Payroll', description: 'June payouts', walletId: mockWalletId },
-        'user-1'
+        mockUserId
       );
 
       expect(mockWalletFindUnique).toHaveBeenCalledWith({ where: { id: mockWalletId } });
@@ -128,7 +131,10 @@ describe('PayrollService', () => {
       mockWalletFindUnique.mockResolvedValue(null);
 
       await expect(
-        PayrollService.createPayrollBatch({ name: 'June Payroll', walletId: 'invalid-wallet' })
+        PayrollService.createPayrollBatch(
+          { name: 'June Payroll', walletId: 'invalid-wallet' },
+          mockUserId
+        )
       ).rejects.toThrow('Wallet not found');
 
       expect(mockPayrollBatchCreate).not.toHaveBeenCalled();
@@ -141,12 +147,34 @@ describe('PayrollService', () => {
         })
       );
     });
+
+    it('should throw an error when the wallet belongs to another user', async () => {
+      mockWalletFindUnique.mockResolvedValue({
+        id: mockWalletId,
+        publicKey: mockPublicKey,
+        userId: 'other-user',
+      });
+
+      await expect(
+        PayrollService.createPayrollBatch(
+          { name: 'June Payroll', walletId: mockWalletId },
+          mockUserId
+        )
+      ).rejects.toThrow('Wallet does not belong to user');
+
+      expect(mockPayrollBatchCreate).not.toHaveBeenCalled();
+    });
   });
 
   describe('addPayrollItem', () => {
+    const ownedBatch = {
+      id: 'batch-123',
+      status: 'pending',
+      wallet: { userId: mockUserId },
+    };
+
     it('should add a payroll item successfully to a pending batch', async () => {
-      const mockBatch = { id: 'batch-123', status: 'pending' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue(ownedBatch);
 
       const mockItem = {
         id: 'item-1',
@@ -159,14 +187,21 @@ describe('PayrollService', () => {
       };
       mockPayrollItemCreate.mockResolvedValue(mockItem);
 
-      const result = await PayrollService.addPayrollItem('batch-123', {
-        recipientAddress: mockPublicKey,
-        amount: '100.00',
-        assetCode: 'USDC',
-        assetIssuer: mockAssetIssuer,
-      });
+      const result = await PayrollService.addPayrollItem(
+        'batch-123',
+        {
+          recipientAddress: mockPublicKey,
+          amount: '100.00',
+          assetCode: 'USDC',
+          assetIssuer: mockAssetIssuer,
+        },
+        mockUserId
+      );
 
-      expect(mockPayrollBatchFindUnique).toHaveBeenCalledWith({ where: { id: 'batch-123' } });
+      expect(mockPayrollBatchFindUnique).toHaveBeenCalledWith({
+        where: { id: 'batch-123' },
+        include: { wallet: { select: { userId: true } } },
+      });
       expect(mockPayrollItemCreate).toHaveBeenCalledWith({
         data: {
           payrollBatchId: 'batch-123',
@@ -185,127 +220,186 @@ describe('PayrollService', () => {
       mockPayrollBatchFindUnique.mockResolvedValue(null);
 
       await expect(
-        PayrollService.addPayrollItem('invalid-batch', {
-          recipientAddress: mockPublicKey,
-          amount: '100.00',
-          assetCode: 'USDC',
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'invalid-batch',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '100.00',
+            assetCode: 'USDC',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
+      ).rejects.toThrow('Payroll batch not found');
+    });
+
+    it('should throw an error if the batch belongs to another user', async () => {
+      mockPayrollBatchFindUnique.mockResolvedValue({
+        id: 'batch-123',
+        status: 'pending',
+        wallet: { userId: 'other-user' },
+      });
+
+      await expect(
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '100.00',
+            assetCode: 'USDC',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Payroll batch not found');
     });
 
     it('should throw an error if the batch is not pending approval', async () => {
-      const mockBatch = { id: 'batch-123', status: 'approved' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue({
+        id: 'batch-123',
+        status: 'approved',
+        wallet: { userId: mockUserId },
+      });
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: mockPublicKey,
-          amount: '100.00',
-          assetCode: 'USDC',
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '100.00',
+            assetCode: 'USDC',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Cannot add items to a batch that is not pending approval');
     });
 
     it('should throw an error if recipientAddress is invalid', async () => {
-      const mockBatch = { id: 'batch-123', status: 'pending' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue(ownedBatch);
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: 'invalid-address',
-          amount: '100.00',
-          assetCode: 'USDC',
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: 'invalid-address',
+            amount: '100.00',
+            assetCode: 'USDC',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Invalid Stellar recipient address');
     });
 
     it('should throw an error if amount is zero or negative', async () => {
-      const mockBatch = { id: 'batch-123', status: 'pending' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue(ownedBatch);
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: mockPublicKey,
-          amount: '-50.00',
-          assetCode: 'USDC',
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '-50.00',
+            assetCode: 'USDC',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Amount must be a positive number');
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: mockPublicKey,
-          amount: '0.00',
-          assetCode: 'USDC',
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '0.00',
+            assetCode: 'USDC',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Amount must be a positive number');
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: mockPublicKey,
-          amount: 'invalid-num',
-          assetCode: 'USDC',
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: 'invalid-num',
+            assetCode: 'USDC',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Amount must be a positive number');
     });
 
     it('should throw an error if assetCode is invalid', async () => {
-      const mockBatch = { id: 'batch-123', status: 'pending' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue(ownedBatch);
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: mockPublicKey,
-          amount: '100.00',
-          assetCode: 'INVALIDASSETCODE12345', // too long
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '100.00',
+            assetCode: 'INVALIDASSETCODE12345',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Asset code must be a non-empty alphanumeric string of 1 to 12 characters');
     });
 
     it('should throw an error if assetIssuer is missing for non-XLM asset', async () => {
-      const mockBatch = { id: 'batch-123', status: 'pending' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue(ownedBatch);
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: mockPublicKey,
-          amount: '100.00',
-          assetCode: 'USDC',
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '100.00',
+            assetCode: 'USDC',
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Asset issuer is required for non-XLM assets');
     });
 
     it('should throw an error if assetIssuer is provided for XLM (native)', async () => {
-      const mockBatch = { id: 'batch-123', status: 'pending' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue(ownedBatch);
 
       await expect(
-        PayrollService.addPayrollItem('batch-123', {
-          recipientAddress: mockPublicKey,
-          amount: '100.00',
-          assetCode: 'XLM',
-          assetIssuer: mockAssetIssuer,
-        })
+        PayrollService.addPayrollItem(
+          'batch-123',
+          {
+            recipientAddress: mockPublicKey,
+            amount: '100.00',
+            assetCode: 'XLM',
+            assetIssuer: mockAssetIssuer,
+          },
+          mockUserId
+        )
       ).rejects.toThrow('Asset issuer must not be provided for XLM (native asset)');
     });
   });
 
   describe('approvePayrollBatch', () => {
     it('should approve a pending batch successfully', async () => {
-      const mockBatch = { id: 'batch-123', status: 'pending' };
+      const mockBatch = {
+        id: 'batch-123',
+        status: 'pending',
+        wallet: { userId: mockUserId },
+      };
       mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
       mockPayrollBatchUpdate.mockResolvedValue({
         ...mockBatch,
         status: 'approved',
       });
 
-      const result = await PayrollService.approvePayrollBatch('batch-123', 'user-1');
+      const result = await PayrollService.approvePayrollBatch('batch-123', mockUserId);
 
       expect(mockPayrollBatchUpdate).toHaveBeenCalledWith({
         where: { id: 'batch-123' },
@@ -324,12 +418,65 @@ describe('PayrollService', () => {
     });
 
     it('should throw an error if trying to approve a non-pending batch', async () => {
-      const mockBatch = { id: 'batch-123', status: 'processing' };
-      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchFindUnique.mockResolvedValue({
+        id: 'batch-123',
+        status: 'processing',
+        wallet: { userId: mockUserId },
+      });
 
-      await expect(PayrollService.approvePayrollBatch('batch-123')).rejects.toThrow(
+      await expect(PayrollService.approvePayrollBatch('batch-123', mockUserId)).rejects.toThrow(
         'Only pending batches can be approved'
       );
+    });
+  });
+
+  describe('getPayrollBatches', () => {
+    it('should return batches scoped to the authenticated user', async () => {
+      const mockBatches = [{ id: 'batch-123', name: 'June Payroll' }];
+      mockPayrollBatchFindMany.mockResolvedValue(mockBatches);
+
+      const result = await PayrollService.getPayrollBatches(mockUserId);
+
+      expect(mockPayrollBatchFindMany).toHaveBeenCalledWith({
+        where: { wallet: { userId: mockUserId } },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(result).toEqual(mockBatches);
+    });
+  });
+
+  describe('getPayrollHistory', () => {
+    it('should return history scoped to the authenticated user', async () => {
+      const mockBatches = [
+        {
+          id: 'batch-123',
+          name: 'June Payroll',
+          items: [
+            {
+              id: 'item-1',
+              payrollBatchId: 'batch-123',
+              recipientAddress: mockPublicKey,
+              amount: '100.00',
+              assetCode: 'USDC',
+              assetIssuer: mockAssetIssuer,
+              memo: null,
+              status: 'completed',
+              stellarTxId: 'tx-1',
+              errorMessage: null,
+            },
+          ],
+        },
+      ];
+      mockPayrollBatchFindMany.mockResolvedValue(mockBatches);
+
+      const result = await PayrollService.getPayrollHistory(mockUserId);
+
+      expect(mockPayrollBatchFindMany).toHaveBeenCalledWith({
+        where: { wallet: { userId: mockUserId } },
+        include: { items: true },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(result[0].items[0].assetIssuer).toBe(mockAssetIssuer);
     });
   });
 
@@ -345,6 +492,7 @@ describe('PayrollService', () => {
           id: mockWalletId,
           publicKey: mockPublicKey,
           secretKeyEncrypted: mockSecretEncrypted,
+          userId: mockUserId,
         },
         items: [
           {
@@ -388,7 +536,7 @@ describe('PayrollService', () => {
       // Mock submitTransaction to succeed
       mockSubmitTransaction.mockResolvedValue({ hash: 'tx-hash-123' });
 
-      const result = await PayrollService.processPayrollBatch('batch-123', 'user-1');
+      const result = await PayrollService.processPayrollBatch('batch-123', mockUserId);
 
       expect(mockPayrollBatchUpdateMany).toHaveBeenCalledWith({
         where: { id: 'batch-123', status: 'approved' },
@@ -404,6 +552,8 @@ describe('PayrollService', () => {
     });
 
     it('should fallback to individual transactions if the batch submission fails', async () => {
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
       mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
       mockPayrollBatchUpdateMany.mockResolvedValue({ count: 1 });
 
@@ -451,20 +601,21 @@ describe('PayrollService', () => {
       };
       mockSubmitTransaction.mockRejectedValueOnce(horizonError);
 
-      const result = await PayrollService.processPayrollBatch('batch-123', 'user-1');
+      const result = await PayrollService.processPayrollBatch('batch-123', mockUserId);
 
       expect(mockSubmitTransaction).toHaveBeenCalledTimes(3); // 1 batch + 2 retries
       expect(result.successful).toBe(1);
       expect(result.failed).toBe(1);
       expect(result.items[0].status).toBe('completed');
       expect(result.items[1].status).toBe('failed');
+      consoleWarnSpy.mockRestore();
     });
 
     it('should throw an error if the batch is already being processed', async () => {
       mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
       mockPayrollBatchUpdateMany.mockResolvedValue({ count: 0 }); // simulating batch already processing
 
-      await expect(PayrollService.processPayrollBatch('batch-123', 'user-1')).rejects.toThrow(
+      await expect(PayrollService.processPayrollBatch('batch-123', mockUserId)).rejects.toThrow(
         'Batch is already being processed'
       );
 
@@ -486,7 +637,7 @@ describe('PayrollService', () => {
       mockPayrollBatchFindUnique.mockResolvedValue(mockBatchWithInvalidSecret);
       mockPayrollBatchUpdateMany.mockResolvedValue({ count: 1 });
 
-      await expect(PayrollService.processPayrollBatch('batch-123', 'user-1')).rejects.toThrow(
+      await expect(PayrollService.processPayrollBatch('batch-123', mockUserId)).rejects.toThrow(
         'Wallet decryption failure'
       );
 
