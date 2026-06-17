@@ -7,7 +7,7 @@ import helmet from 'helmet';
 
 import prisma from './config/database';
 import authRouter from './routes/auth.routes';
-import fxRouter from './routes/fx.routes';
+
 
 // Load backend-level .env file
 config({ path: path.resolve(__dirname, '../.env') });
@@ -41,6 +41,9 @@ app.get('/api/v1', (_req, res) => {
 // Auth routes
 app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/fx', fxRouter);
+
+// Payroll routes
+app.use('/api/v1/payroll', payrollRouter);
 
 // Database connection check and server start
 async function startServer(): Promise<void> {

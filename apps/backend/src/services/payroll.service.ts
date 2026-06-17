@@ -89,6 +89,28 @@ function mapToPayrollItem(item: DbPayrollItem): PayrollItem {
   };
 }
 
+type PayrollBatchWithWallet = PayrollBatch & { wallet: { userId: string } };
+
+/**
+ * Verify the batch exists and belongs to the authenticated user.
+ * Returns a generic not-found error to avoid leaking batch existence.
+ */
+async function assertBatchOwnedByUser(
+  batchId: string,
+  userId: string
+): Promise<PayrollBatchWithWallet> {
+  const batch = await prisma.payrollBatch.findUnique({
+    where: { id: batchId },
+    include: { wallet: { select: { userId: true } } },
+  });
+
+  if (!batch || batch.wallet.userId !== userId) {
+    throw new Error('Payroll batch not found');
+  }
+
+  return batch;
+}
+
 /**
  * Audit log helper
  */
@@ -121,9 +143,9 @@ export const PayrollService = {
    */
   async createPayrollBatch(
     options: CreatePayrollBatchOptions,
-    userId?: string
+    userId: string
   ): Promise<PayrollBatch> {
-    // Verify wallet exists
+    // Verify wallet exists and belongs to the user
     const wallet = await prisma.wallet.findUnique({
       where: { id: options.walletId },
     });
@@ -133,6 +155,13 @@ export const PayrollService = {
         walletId: options.walletId,
       });
       throw new Error('Wallet not found');
+    }
+    if (wallet.userId !== userId) {
+      await logAudit(userId, 'payroll_batch_create_failed', null, false, {
+        error: 'Wallet does not belong to user',
+        walletId: options.walletId,
+      });
+      throw new Error('Wallet does not belong to user');
     }
 
     const batch = await prisma.payrollBatch.create({
@@ -160,14 +189,9 @@ export const PayrollService = {
       PayrollItem,
       'id' | 'payrollBatchId' | 'status' | 'stellarTxId' | 'errorMessage'
     >,
-    userId?: string
+    userId: string
   ): Promise<PayrollItem> {
-    const batch = await prisma.payrollBatch.findUnique({
-      where: { id: batchId },
-    });
-    if (!batch) {
-      throw new Error('Payroll batch not found');
-    }
+    const batch = await assertBatchOwnedByUser(batchId, userId);
     if (batch.status !== 'pending') {
       throw new Error('Cannot add items to a batch that is not pending approval');
     }
@@ -221,15 +245,17 @@ export const PayrollService = {
   /**
    * Approve a payroll batch
    */
-  async approvePayrollBatch(batchId: string, userId?: string): Promise<PayrollBatch> {
-    const batch = await prisma.payrollBatch.findUnique({
-      where: { id: batchId },
-    });
-    if (!batch) {
-      await logAudit(userId, 'payroll_batch_approve_failed', batchId, false, {
-        error: 'Batch not found',
-      });
-      throw new Error('Payroll batch not found');
+  async approvePayrollBatch(batchId: string, userId: string): Promise<PayrollBatch> {
+    let batch: PayrollBatchWithWallet;
+    try {
+      batch = await assertBatchOwnedByUser(batchId, userId);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Payroll batch not found') {
+        await logAudit(userId, 'payroll_batch_approve_failed', batchId, false, {
+          error: 'Batch not found',
+        });
+      }
+      throw error;
     }
     if (batch.status !== 'pending') {
       await logAudit(userId, 'payroll_batch_approve_failed', batchId, false, {
@@ -251,14 +277,22 @@ export const PayrollService = {
   /**
    * Retrieve a payroll batch by ID with its items
    */
-  async getPayrollBatch(batchId: string): Promise<PayrollBatch & { items: PayrollItem[] }> {
+  async getPayrollBatch(
+    batchId: string,
+    userId: string
+  ): Promise<PayrollBatch & { items: PayrollItem[] }> {
     const batch = await prisma.payrollBatch.findUnique({
       where: { id: batchId },
-      include: { items: true },
+      include: {
+        items: true,
+        wallet: { select: { userId: true } },
+      },
     });
-    if (!batch) {
+
+    if (!batch || batch.wallet.userId !== userId) {
       throw new Error('Payroll batch not found');
     }
+
     return {
       ...batch,
       items: batch.items.map(mapToPayrollItem),
@@ -266,20 +300,24 @@ export const PayrollService = {
   },
 
   /**
-   * Retrieve all payroll batches (optionally filtered by wallet)
+   * Retrieve all payroll batches for a user (optionally filtered by wallet)
    */
-  async getPayrollBatches(walletId?: string): Promise<PayrollBatch[]> {
+  async getPayrollBatches(userId: string, walletId?: string): Promise<PayrollBatch[]> {
     return prisma.payrollBatch.findMany({
-      where: walletId ? { walletId } : {},
+      where: {
+        wallet: { userId },
+        ...(walletId ? { walletId } : {}),
+      },
       orderBy: { createdAt: 'desc' },
     });
   },
 
   /**
-   * Retrieve complete payroll history
+   * Retrieve complete payroll history for a user
    */
-  async getPayrollHistory(): Promise<(PayrollBatch & { items: PayrollItem[] })[]> {
+  async getPayrollHistory(userId: string): Promise<(PayrollBatch & { items: PayrollItem[] })[]> {
     const batches = await prisma.payrollBatch.findMany({
+      where: { wallet: { userId } },
       include: { items: true },
       orderBy: { createdAt: 'desc' },
     });
@@ -292,7 +330,7 @@ export const PayrollService = {
   /**
    * Process payroll payments via batch Stellar transactions
    */
-  async processPayrollBatch(batchId: string, userId?: string): Promise<ProcessPayrollResult> {
+  async processPayrollBatch(batchId: string, userId: string): Promise<ProcessPayrollResult> {
     const batch = await prisma.payrollBatch.findUnique({
       where: { id: batchId },
       include: {
@@ -301,7 +339,7 @@ export const PayrollService = {
       },
     });
 
-    if (!batch) {
+    if (!batch || batch.wallet.userId !== userId) {
       await logAudit(userId, 'payroll_batch_process_failed', batchId, false, {
         error: 'Batch not found',
       });
