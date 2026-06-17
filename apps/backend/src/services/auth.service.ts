@@ -10,9 +10,9 @@ import { addDays } from 'date-fns';
 import jwt from 'jsonwebtoken';
 
 import prisma from '../config/database';
-import type { AuthTokens, RegisterRequest, LoginRequest, JwtPayload } from '../types';
+import type { AuthTokens, RegisterRequest, LoginCredentials, JwtPayload } from '../types';
 
-const SALT_ROUNDS = 10;
+const SALT_ROUNDS = 12;
 const ACCESS_TOKEN_EXPIRY = '15m';
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 
@@ -53,7 +53,7 @@ export const AuthService = {
   /**
    * Generate JWT access token
    */
-  generateAccessToken(payload: JwtPayload): string {
+  generateAccessToken(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
     validateJwtSecrets();
     return jwt.sign(payload, process.env.JWT_SECRET!, {
       expiresIn: ACCESS_TOKEN_EXPIRY,
@@ -63,7 +63,7 @@ export const AuthService = {
   /**
    * Generate JWT refresh token
    */
-  generateRefreshToken(payload: JwtPayload): string {
+  generateRefreshToken(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
     validateJwtSecrets();
     return jwt.sign(payload, process.env.JWT_REFRESH_SECRET!, {
       expiresIn: `${REFRESH_TOKEN_EXPIRY_DAYS}d`,
@@ -127,9 +127,10 @@ export const AuthService = {
     });
 
     // Generate tokens
-    const jwtPayload: JwtPayload = {
+    const jwtPayload: Omit<JwtPayload, 'iat' | 'exp'> = {
       userId: user.id,
       email: user.email,
+      role: user.role,
     };
 
     const accessToken = this.generateAccessToken(jwtPayload);
@@ -158,7 +159,7 @@ export const AuthService = {
    * Login a user
    */
   async login(
-    data: LoginRequest
+    data: LoginCredentials
   ): Promise<{ user: Omit<User, 'passwordHash'>; tokens: AuthTokens }> {
     // Find user by email
     const user = await prisma.user.findUnique({
@@ -182,9 +183,10 @@ export const AuthService = {
     }
 
     // Generate tokens
-    const jwtPayload: JwtPayload = {
+    const jwtPayload: Omit<JwtPayload, 'iat' | 'exp'> = {
       userId: user.id,
       email: user.email,
+      role: user.role,
     };
 
     const accessToken = this.generateAccessToken(jwtPayload);
@@ -254,9 +256,10 @@ export const AuthService = {
     });
 
     // Generate new tokens
-    const jwtPayload: JwtPayload = {
+    const jwtPayload: Omit<JwtPayload, 'iat' | 'exp'> = {
       userId: payload.userId,
       email: payload.email,
+      role: tokenRecord.user.role,
     };
 
     const accessToken = this.generateAccessToken(jwtPayload);

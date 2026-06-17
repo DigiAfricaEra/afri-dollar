@@ -4,10 +4,7 @@
  */
 import type { User } from '@prisma/client';
 
-export type AuthTokens = {
-  accessToken: string;
-  refreshToken: string;
-};
+export * from './auth.types';
 
 export type RegisterRequest = {
   email: string;
@@ -30,7 +27,7 @@ export type AuthResponse = {
   success: boolean;
   data: {
     user: Omit<User, 'passwordHash'>;
-    tokens: AuthTokens;
+    tokens: import('./auth.types').AuthTokens;
   };
 };
 
@@ -45,11 +42,4 @@ export type TokenRefreshResponse = {
 export type UserResponse = {
   success: boolean;
   data: Omit<User, 'passwordHash'>;
-};
-
-export type JwtPayload = {
-  userId: string;
-  email: string;
-  iat?: number;
-  exp?: number;
 };
