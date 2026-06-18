@@ -5,6 +5,24 @@ import { AppError } from '../types';
 import type { JwtPayload } from '../types';
 
 /**
+ * Role permissions mapping
+ * Defines which permissions each role has access to
+ */
+const ROLE_PERMISSIONS: Record<string, string[]> = {
+  ADMIN: ['*'], // Full access
+  BUSINESS: [
+    'wallet:read',
+    'wallet:write',
+    'transaction:read',
+    'transaction:write',
+    'payroll:read',
+    'payroll:write',
+  ],
+  USER: ['wallet:read', 'transaction:read'],
+  AUDITOR: ['wallet:read', 'transaction:read', 'audit:read'],
+};
+
+/**
  * Extended Request interface with user payload
  */
 export interface AuthRequest extends Request {
@@ -107,21 +125,6 @@ export const requireRole = (...roles: string[]) => {
  * @param permission - The permission string to check
  */
 export const requirePermission = (permission: string) => {
-  // Define role permissions
-  const rolePermissions: Record<string, string[]> = {
-    ADMIN: ['*'], // Full access
-    BUSINESS: [
-      'wallet:read',
-      'wallet:write',
-      'transaction:read',
-      'transaction:write',
-      'payroll:read',
-      'payroll:write',
-    ],
-    USER: ['wallet:read', 'transaction:read'],
-    AUDITOR: ['wallet:read', 'transaction:read', 'audit:read'],
-  };
-
   return (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user) {
       res.status(401).json({
@@ -131,16 +134,11 @@ export const requirePermission = (permission: string) => {
       return;
     }
 
-    const userPermissions = rolePermissions[req.user.role] || [];
-
-    // Admin has full access
-    if (req.user.role === 'ADMIN') {
-      next();
-      return;
-    }
+    const userPermissions = ROLE_PERMISSIONS[req.user.role] || [];
 
     // Check if user has the required permission
-    if (!userPermissions.includes(permission)) {
+    // Admin has full access via '*' wildcard
+    if (!userPermissions.includes('*') && !userPermissions.includes(permission)) {
       res.status(403).json({
         success: false,
         error: 'Insufficient permissions',
