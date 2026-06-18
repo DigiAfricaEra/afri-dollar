@@ -5,13 +5,19 @@ import { createRef } from 'react';
 
 import { Avatar } from '../src/components/ui/avatar';
 import { Button } from '../src/components/ui/button';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../src/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '../src/components/ui/card';
 import { Input } from '../src/components/ui/input';
 import { Modal, ModalBody, ModalFooter, ModalHeader, ModalTitle } from '../src/components/ui/modal';
 import { Select } from '../src/components/ui/select';
 
 describe('UI Component Library Tests', () => {
-  
   // ==========================================
   // Button Component Tests
   // ==========================================
@@ -22,12 +28,20 @@ describe('UI Component Library Tests', () => {
     });
 
     it('applies sizes and variants correctly', () => {
-      const { rerender } = render(<Button size="sm" variant="danger">Btn</Button>);
+      const { rerender } = render(
+        <Button size="sm" variant="danger">
+          Btn
+        </Button>
+      );
       let button = screen.getByRole('button');
       expect(button).toHaveClass('px-3');
       expect(button).toHaveClass('bg-red-600');
 
-      rerender(<Button size="lg" variant="outline">Btn</Button>);
+      rerender(
+        <Button size="lg" variant="outline">
+          Btn
+        </Button>
+      );
       button = screen.getByRole('button');
       expect(button).toHaveClass('px-5');
       expect(button).toHaveClass('border-slate-300');

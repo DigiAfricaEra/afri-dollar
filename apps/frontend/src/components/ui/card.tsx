@@ -13,11 +13,7 @@ export const Card = forwardRef<HTMLDivElement, CardProps>(
       : '';
 
     return (
-      <div
-        ref={ref}
-        className={`${baseStyle} ${hoverStyle} ${className}`}
-        {...props}
-      >
+      <div ref={ref} className={`${baseStyle} ${hoverStyle} ${className}`} {...props}>
         {children}
       </div>
     );
@@ -28,11 +24,7 @@ Card.displayName = 'Card';
 export const CardHeader = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(
   ({ className = '', children, ...props }, ref): JSX.Element => {
     return (
-      <div
-        ref={ref}
-        className={`flex flex-col gap-1.5 p-6 ${className}`}
-        {...props}
-      >
+      <div ref={ref} className={`flex flex-col gap-1.5 p-6 ${className}`} {...props}>
         {children}
       </div>
     );
@@ -55,19 +47,20 @@ export const CardTitle = forwardRef<HTMLHeadingElement, HTMLAttributes<HTMLHeadi
 );
 CardTitle.displayName = 'CardTitle';
 
-export const CardDescription = forwardRef<HTMLParagraphElement, HTMLAttributes<HTMLParagraphElement>>(
-  ({ className = '', children, ...props }, ref): JSX.Element => {
-    return (
-      <p
-        ref={ref}
-        className={`text-xs md:text-sm text-slate-500 dark:text-slate-400 ${className}`}
-        {...props}
-      >
-        {children}
-      </p>
-    );
-  }
-);
+export const CardDescription = forwardRef<
+  HTMLParagraphElement,
+  HTMLAttributes<HTMLParagraphElement>
+>(({ className = '', children, ...props }, ref): JSX.Element => {
+  return (
+    <p
+      ref={ref}
+      className={`text-xs md:text-sm text-slate-500 dark:text-slate-400 ${className}`}
+      {...props}
+    >
+      {children}
+    </p>
+  );
+});
 CardDescription.displayName = 'CardDescription';
 
 export const CardContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>(

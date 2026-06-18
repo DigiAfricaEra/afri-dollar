@@ -69,7 +69,11 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
             className="text-sm font-medium text-slate-700 dark:text-slate-300 select-none"
           >
             {label}
-            {required && <span className="text-red-500 ml-1" data-testid="select-required">*</span>}
+            {required && (
+              <span className="text-red-500 ml-1" data-testid="select-required">
+                *
+              </span>
+            )}
           </label>
         )}
 
@@ -80,9 +84,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(
             disabled={disabled}
             required={required}
             aria-invalid={error ? 'true' : 'false'}
-            aria-describedby={
-              error ? errorId : helperText ? helperId : undefined
-            }
+            aria-describedby={error ? errorId : helperText ? helperId : undefined}
             className={`${selectBaseClass} ${selectVariantClass} ${className}`}
             {...props}
           >

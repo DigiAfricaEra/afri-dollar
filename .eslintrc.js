@@ -1,5 +1,15 @@
 module.exports = {
   root: true,
+  // Exclude JS config files from type-aware linting (not in tsconfig)
+  ignorePatterns: [
+    '**/.eslintrc.js',
+    '**/*.config.js',
+    '**/*.config.ts',
+    '**/jest.config.js',
+    '**/jest.setup.js',
+    '**/postcss.config.js',
+    '**/commitlint.config.js',
+  ],
   parser: '@typescript-eslint/parser',
   parserOptions: {
     ecmaVersion: 2022,

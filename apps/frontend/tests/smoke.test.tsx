@@ -22,7 +22,7 @@ describe('Frontend Smoke Tests', () => {
     render(<Button variant="primary">Click me</Button>);
     const button = screen.getByRole('button', { name: /click me/i });
     expect(button).toBeInTheDocument();
-    expect(button).toHaveClass('bg-blue-600');
+    expect(button).toHaveClass('bg-primary-600');
   });
 
   it('renders outline button', () => {

@@ -20,7 +20,9 @@ export function ModalHeader({
   className?: string;
 }): JSX.Element {
   return (
-    <div className={`px-6 py-4 border-b border-slate-150 dark:border-slate-800 flex justify-between items-center ${className}`}>
+    <div
+      className={`px-6 py-4 border-b border-slate-150 dark:border-slate-800 flex justify-between items-center ${className}`}
+    >
       {children}
     </div>
   );
@@ -50,7 +52,9 @@ export function ModalBody({
   className?: string;
 }): JSX.Element {
   return (
-    <div className={`px-6 py-4 text-slate-600 dark:text-slate-350 text-sm md:text-base ${className}`}>
+    <div
+      className={`px-6 py-4 text-slate-600 dark:text-slate-350 text-sm md:text-base ${className}`}
+    >
       {children}
     </div>
   );
@@ -64,7 +68,9 @@ export function ModalFooter({
   className?: string;
 }): JSX.Element {
   return (
-    <div className={`px-6 py-4 border-t border-slate-150 dark:border-slate-800 flex justify-end gap-3 bg-slate-50 dark:bg-slate-950/40 rounded-b-lg ${className}`}>
+    <div
+      className={`px-6 py-4 border-t border-slate-150 dark:border-slate-800 flex justify-end gap-3 bg-slate-50 dark:bg-slate-950/40 rounded-b-lg ${className}`}
+    >
       {children}
     </div>
   );

@@ -30,7 +30,7 @@ export function useWallet(publicKey?: string): WalletState {
     let isMounted = true;
     setState((prev: WalletState): WalletState => ({ ...prev, loading: true, error: null }));
 
-    loadStellarAccount(publicKey)
+    void loadStellarAccount(publicKey)
       .then((data: { balances: Array<{ balance: string; asset_type: string }> }) => {
         if (!isMounted) return;
         const usdcBalance = data.balances.find((b) => b.asset_type === 'credit_alphanum4');
