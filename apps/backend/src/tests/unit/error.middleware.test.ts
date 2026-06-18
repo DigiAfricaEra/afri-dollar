@@ -1,4 +1,5 @@
-import type { Request, Response, NextFunction } from 'express';
+/* eslint-disable @typescript-eslint/unbound-method */
+import type { Request, NextFunction } from 'express';
 
 import {
   AppError,
@@ -10,15 +11,31 @@ import {
   errorMiddleware,
 } from '../../middleware/error.middleware';
 
-const mockRes = () => {
-  const res = {} as Response;
-  res.status = jest.fn().mockReturnValue(res);
-  res.json = jest.fn().mockReturnValue(res);
+interface MockResponse {
+  statusCode: number;
+  body: unknown;
+  status(code: number): MockResponse;
+  json(payload: unknown): MockResponse;
+}
+
+function createMockResponse(): MockResponse {
+  const res: MockResponse = {
+    statusCode: 200,
+    body: undefined,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      this.body = payload;
+      return this;
+    },
+  };
   return res;
-};
+}
 
 const req = {} as Request;
-const next = jest.fn() as NextFunction;
+const next = jest.fn() as unknown as NextFunction;
 
 describe('Error Classes', () => {
   it('AppError sets statusCode, code, isOperational', () => {
@@ -52,10 +69,16 @@ describe('Error Classes', () => {
 describe('ERROR_CODES', () => {
   it('contains all required codes', () => {
     const required = [
-      'AUTH_001', 'AUTH_002', 'AUTH_003',
-      'WALLET_001', 'WALLET_002',
-      'TXN_001', 'TXN_002',
-      'FX_001', 'COMPLIANCE_001', 'SERVER_001',
+      'AUTH_001',
+      'AUTH_002',
+      'AUTH_003',
+      'WALLET_001',
+      'WALLET_002',
+      'TXN_001',
+      'TXN_002',
+      'FX_001',
+      'COMPLIANCE_001',
+      'SERVER_001',
     ];
     for (const code of required) {
       expect(ERROR_CODES).toHaveProperty(code);
@@ -67,67 +90,67 @@ describe('errorMiddleware', () => {
   beforeEach(() => jest.clearAllMocks());
 
   it('handles AppError with correct status and format', () => {
-    const res = mockRes();
+    const res = createMockResponse();
     const err = new AppError('Wallet not found', 404, 'WALLET_001');
-    errorMiddleware(err, req, res, next);
+    errorMiddleware(err, req, res as never, next);
 
-    expect(res.status).toHaveBeenCalledWith(404);
-    expect(res.json).toHaveBeenCalledWith({
+    expect(res.statusCode).toBe(404);
+    expect(res.body).toEqual({
       success: false,
       error: { code: 'WALLET_001', message: 'Wallet not found' },
     });
   });
 
   it('handles AuthenticationError', () => {
-    const res = mockRes();
-    errorMiddleware(new AuthenticationError('Invalid credentials', 'AUTH_001'), req, res, next);
-    expect(res.status).toHaveBeenCalledWith(401);
-    expect(res.json).toHaveBeenCalledWith(
-      expect.objectContaining({ success: false })
+    const res = createMockResponse();
+    errorMiddleware(
+      new AuthenticationError('Invalid credentials', 'AUTH_001'),
+      req,
+      res as never,
+      next
     );
+    expect(res.statusCode).toBe(401);
+    expect((res.body as Record<string, unknown>).success).toBe(false);
   });
 
   it('handles AuthorizationError', () => {
-    const res = mockRes();
-    errorMiddleware(new AuthorizationError(), req, res, next);
-    expect(res.status).toHaveBeenCalledWith(403);
+    const res = createMockResponse();
+    errorMiddleware(new AuthorizationError(), req, res as never, next);
+    expect(res.statusCode).toBe(403);
   });
 
   it('handles NotFoundError', () => {
-    const res = mockRes();
-    errorMiddleware(new NotFoundError(), req, res, next);
-    expect(res.status).toHaveBeenCalledWith(404);
+    const res = createMockResponse();
+    errorMiddleware(new NotFoundError(), req, res as never, next);
+    expect(res.statusCode).toBe(404);
   });
 
   it('handles ValidationError', () => {
-    const res = mockRes();
-    errorMiddleware(new ValidationError(), req, res, next);
-    expect(res.status).toHaveBeenCalledWith(422);
+    const res = createMockResponse();
+    errorMiddleware(new ValidationError(), req, res as never, next);
+    expect(res.statusCode).toBe(422);
   });
 
   it('handles unexpected errors as 500 without exposing internals', () => {
-    const res = mockRes();
+    const res = createMockResponse();
     const err = new Error('Database exploded');
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
-    errorMiddleware(err, req, res, next);
+    errorMiddleware(err, req, res as never, next);
 
-    expect(res.status).toHaveBeenCalledWith(500);
-    expect(res.json).toHaveBeenCalledWith({
+    expect(res.statusCode).toBe(500);
+    expect(res.body).toEqual({
       success: false,
       error: { code: 'SERVER_001', message: ERROR_CODES.SERVER_001 },
     });
-    // Sensitive message not leaked
-    const jsonCall = (res.json as jest.Mock).mock.calls[0][0];
-    expect(JSON.stringify(jsonCall)).not.toContain('Database exploded');
+    expect(JSON.stringify(res.body)).not.toContain('Database exploded');
 
     consoleSpy.mockRestore();
   });
 
   it('response always has success: false', () => {
-    const res = mockRes();
-    errorMiddleware(new AppError('any', 400, 'AUTH_001'), req, res, next);
-    const body = (res.json as jest.Mock).mock.calls[0][0];
-    expect(body.success).toBe(false);
+    const res = createMockResponse();
+    errorMiddleware(new AppError('any', 400, 'AUTH_001'), req, res as never, next);
+    expect((res.body as Record<string, unknown>).success).toBe(false);
   });
 });
