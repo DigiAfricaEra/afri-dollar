@@ -6,6 +6,8 @@ import express, { json, urlencoded } from 'express';
 import helmet from 'helmet';
 
 import prisma from './config/database';
+import redisClient from './config/redis';
+import { adminLimiter, apiLimiter, authLimiter } from './middleware/rate-limit.middleware';
 import authRouter from './routes/auth.routes';
 import fxRouter from './routes/fx.routes';
 import payrollRouter from './routes/payroll.routes';
@@ -39,21 +41,21 @@ app.get('/api/v1', (_req, res) => {
   });
 });
 
-// Auth routes
+// Auth routes — stricter rate limit (brute-force / credential-stuffing protection)
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/auth', authRouter);
+app.use('/api/v1/auth', authLimiter, authRouter);
 
-// FX routes
+// FX routes — standard rate limit
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/fx', fxRouter);
+app.use('/api/v1/fx', apiLimiter, fxRouter);
 
-// Payroll routes
+// Payroll routes — standard rate limit
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/payroll', payrollRouter);
+app.use('/api/v1/payroll', apiLimiter, payrollRouter);
 
-// Treasury routes (admin only)
+// Treasury routes (admin only) — more permissive rate limit
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/treasury', treasuryRouter);
+app.use('/api/v1/treasury', adminLimiter, treasuryRouter);
 
 // Database connection check and server start
 async function startServer(): Promise<void> {
@@ -76,10 +78,10 @@ void startServer();
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM signal received: closing HTTP server');
-  void prisma.$disconnect().then(() => process.exit(0));
+  void Promise.all([prisma.$disconnect(), redisClient.quit()]).then(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
   console.log('SIGINT signal received: closing HTTP server');
-  void prisma.$disconnect().then(() => process.exit(0));
+  void Promise.all([prisma.$disconnect(), redisClient.quit()]).then(() => process.exit(0));
 });

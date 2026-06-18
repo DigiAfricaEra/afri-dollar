@@ -11,29 +11,32 @@
     "test": "jest"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "helmet": "^7.1.0",
-    "dotenv": "^16.3.1",
-    "@stellar/stellar-sdk": "^12.3.0",
     "@afri-dollar/database": "0.1.0",
     "@afri-dollar/shared": "0.1.0",
-    "zod": "^3.22.4",
-    "jsonwebtoken": "^9.0.2",
+    "@stellar/stellar-sdk": "^12.3.0",
     "bcrypt": "^5.1.1",
-    "date-fns": "^3.0.0"
+    "cors": "^2.8.5",
+    "date-fns": "^3.0.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^7.5.1",
+    "helmet": "^7.1.0",
+    "ioredis": "^5.11.1",
+    "jsonwebtoken": "^9.0.2",
+    "rate-limit-redis": "^4.3.1",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
-    "@types/cors": "^2.8.17",
-    "@types/node": "^20.10.5",
-    "@types/jsonwebtoken": "^9.0.5",
     "@types/bcrypt": "^5.0.2",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
     "@types/jest": "^29.5.11",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/node": "^20.10.5",
+    "eslint": "^8.57.1",
     "jest": "^29.7.0",
     "ts-jest": "^29.1.1",
-    "typescript": "^5.3.3",
     "ts-node-dev": "^2.0.0",
-    "eslint": "^8.57.1"
+    "typescript": "^5.3.3"
   }
 }
