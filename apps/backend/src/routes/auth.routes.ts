@@ -2,6 +2,8 @@ import { Router } from 'express';
 
 import { AuthController } from '../controllers/auth.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { validate } from '../middleware/validation.middleware';
+import { loginSchema, registerSchema, refreshTokenSchema } from '../utils/validation';
 
 /**
  * Auth Routes
@@ -15,7 +17,7 @@ const authRouter = Router();
  * Request body: { email: string, password: string, firstName?: string, lastName?: string, phoneNumber?: string }
  * Response: { success: boolean, data: { user: User, tokens: AuthTokens } }
  */
-authRouter.post('/register', (req, res, next) => {
+authRouter.post('/register', validate(registerSchema), (req, res, next) => {
   AuthController.register(req, res).catch(next);
 });
 
@@ -25,7 +27,7 @@ authRouter.post('/register', (req, res, next) => {
  * Request body: { email: string, password: string }
  * Response: { success: boolean, data: { user: User, tokens: AuthTokens } }
  */
-authRouter.post('/login', (req, res, next) => {
+authRouter.post('/login', validate(loginSchema), (req, res, next) => {
   AuthController.login(req, res).catch(next);
 });
 
@@ -34,7 +36,7 @@ authRouter.post('/login', (req, res, next) => {
  * Logout a user (requires valid JWT)
  * Invalidates refresh token
  */
-authRouter.post('/logout', authMiddleware, (req, res, next) => {
+authRouter.post('/logout', authMiddleware, validate(refreshTokenSchema), (req, res, next) => {
   AuthController.logout(req, res).catch(next);
 });
 
@@ -44,7 +46,7 @@ authRouter.post('/logout', authMiddleware, (req, res, next) => {
  * Request body: { refreshToken: string }
  * Response: { success: boolean, data: { accessToken: string, refreshToken: string } }
  */
-authRouter.post('/refresh', (req, res, next) => {
+authRouter.post('/refresh', validate(refreshTokenSchema), (req, res, next) => {
   AuthController.refresh(req, res).catch(next);
 });
 

@@ -3,95 +3,46 @@
  * Handles payroll-related HTTP requests
  */
 import type { Response } from 'express';
-import { z } from 'zod';
 
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { PayrollService } from '../services/payroll.service';
+import { AppError } from '../types';
+import type { CreatePayrollBatchOptions } from '../types';
+import { batchIdParamSchema } from '../utils/validation';
 
-const createBatchSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  description: z.string().optional(),
-  walletId: z.string().min(1, 'Wallet ID is required'),
-});
-
-const addItemSchema = z.object({
-  recipientAddress: z.string().min(1, 'Recipient address is required'),
-  amount: z.string().min(1, 'Amount is required'),
-  assetCode: z.string().min(1, 'Asset code is required'),
-  assetIssuer: z.string().optional(),
-  memo: z.string().optional(),
-});
-
-const batchIdParamSchema = z.object({
-  id: z.string().min(1, 'Batch ID is required'),
-});
-
-function getErrorResponse(error: Error): { status: number; message: string } {
-  const errorMap: Record<string, { status: number; message: string }> = {
-    'Wallet not found': { status: 404, message: 'Wallet not found' },
-    'Wallet does not belong to user': { status: 404, message: 'Wallet not found' },
-    'Payroll batch not found': { status: 404, message: 'Payroll batch not found' },
-    'Cannot add items to a batch that is not pending approval': {
-      status: 400,
-      message: 'Cannot add items to a batch that is not pending approval',
-    },
-    'Only pending batches can be approved': {
-      status: 400,
-      message: 'Only pending batches can be approved',
-    },
-    'Only approved batches can be processed': {
-      status: 400,
-      message: 'Only approved batches can be processed',
-    },
-    'Batch is already being processed': {
-      status: 409,
-      message: 'Batch is already being processed',
-    },
-    'Invalid Stellar recipient address': {
-      status: 400,
-      message: 'Invalid Stellar recipient address',
-    },
-    'Amount must be a positive number': {
-      status: 400,
-      message: 'Amount must be a positive number',
-    },
-    'Asset code must be a non-empty alphanumeric string of 1 to 12 characters': {
-      status: 400,
-      message: 'Asset code must be a non-empty alphanumeric string of 1 to 12 characters',
-    },
-    'Asset issuer is required for non-XLM assets': {
-      status: 400,
-      message: 'Asset issuer is required for non-XLM assets',
-    },
-    'Invalid Stellar asset issuer address': {
-      status: 400,
-      message: 'Invalid Stellar asset issuer address',
-    },
-    'Asset issuer must not be provided for XLM (native asset)': {
-      status: 400,
-      message: 'Asset issuer must not be provided for XLM (native asset)',
-    },
-    'Wallet decryption failure': { status: 500, message: 'Wallet decryption failure' },
-  };
-
-  return errorMap[error.message] || { status: 500, message: 'An error occurred' };
-}
-
+/**
+ * Maps standard runtime errors using the app error pattern
+ */
 function handleError(res: Response, error: unknown): void {
-  if (error instanceof z.ZodError) {
-    res.status(400).json({
-      success: false,
-      error: 'Validation error',
-      details: error.errors,
-    });
+  if (error instanceof AppError) {
+    res.status(error.status).json({ success: false, error: error.message });
     return;
   }
 
   if (error instanceof Error) {
-    const { status, message } = getErrorResponse(error);
+    const errorMap: Record<string, number> = {
+      'Wallet not found': 404,
+      'Wallet does not belong to user': 404,
+      'Payroll batch not found': 404,
+      'Cannot add items to a batch that is not pending approval': 400,
+      'Only pending batches can be approved': 400,
+      'Only approved batches can be processed': 400,
+      'Batch is already being processed': 409,
+      'Invalid Stellar recipient address': 400,
+      'Amount must be a positive number': 400,
+      'Asset code must be a non-empty alphanumeric string of 1 to 12 characters': 400,
+      'Asset issuer is required for non-XLM assets': 400,
+      'Invalid Stellar asset issuer address': 400,
+      'Asset issuer must not be provided for XLM (native asset)': 400,
+      'Wallet decryption failure': 500,
+    };
+
+    const status = errorMap[error.message] || 500;
+    const clientMessage = status === 500 ? 'An error occurred' : error.message;
+
     res.status(status).json({
       success: false,
-      error: message,
+      error: clientMessage,
     });
     return;
   }
@@ -119,7 +70,8 @@ export const PayrollController = {
       const userId = requireUser(req, res);
       if (!userId) return;
 
-      const validatedData = createBatchSchema.parse(req.body);
+      // Cast cleanly to the specific options configuration your service layer expects
+      const validatedData = req.body as CreatePayrollBatchOptions;
       const batch = await PayrollService.createPayrollBatch(validatedData, userId);
 
       res.status(201).json({
@@ -170,7 +122,16 @@ export const PayrollController = {
       if (!userId) return;
 
       const { id } = batchIdParamSchema.parse(req.params);
-      const validatedData = addItemSchema.parse(req.body);
+
+      // Inline the exact interface expected by the parameter to bridge the null vs undefined gap
+      const validatedData = req.body as {
+        recipientAddress: string;
+        amount: string;
+        assetCode: string;
+        assetIssuer?: string;
+        memo?: string;
+      };
+
       const item = await PayrollService.addPayrollItem(id, validatedData, userId);
 
       res.status(201).json({

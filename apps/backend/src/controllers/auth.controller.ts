@@ -2,11 +2,11 @@
  * Auth Controller
  * Handles authentication-related HTTP requests
  */
-import type { Response } from 'express';
-import { z } from 'zod';
+import { Response } from 'express';
 
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { AuthService } from '../services/auth.service';
+import { AppError } from '../types';
 import type {
   RegisterRequest,
   LoginRequest,
@@ -16,53 +16,21 @@ import type {
   UserResponse,
 } from '../types';
 
-// Zod validation schemas
-const registerSchema = z.object({
-  email: z.string().email('Invalid email format'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  firstName: z.string().optional(),
-  lastName: z.string().optional(),
-  phoneNumber: z.string().optional(),
-});
-
-const loginSchema = z.object({
-  email: z.string().email('Invalid email format'),
-  password: z.string().min(1, 'Password is required'),
-});
-
-const refreshTokenSchema = z.object({
-  refreshToken: z.string().min(1, 'Refresh token is required'),
-});
-
 /**
- * Map known domain errors to status codes and user-friendly messages
- * Returns generic 500 + message for unknown errors to avoid leaking internal details
+ * Handles error mapping to avoid dense walls of string checks
  */
-function getErrorResponse(error: Error): { status: number; message: string } {
-  const errorMap: Record<string, { status: number; message: string }> = {
-    'User with this email already exists': { status: 400, message: 'Email already registered' },
-    'User with this phone number already exists': {
-      status: 400,
-      message: 'Phone number already registered',
-    },
-    'Invalid email or password': { status: 401, message: 'Invalid credentials' },
-    'User account is inactive': { status: 403, message: 'Account is inactive' },
-    'Invalid refresh token': { status: 401, message: 'Invalid refresh token' },
-    'Refresh token has been revoked': { status: 401, message: 'Refresh token has been revoked' },
-    'Refresh token has expired': { status: 401, message: 'Refresh token has expired' },
-    'Refresh token does not belong to this user': { status: 401, message: 'Invalid refresh token' },
-    'User not found': { status: 404, message: 'User not found' },
-    'JWT_SECRET environment variable is required': {
-      status: 500,
-      message: 'Server configuration error',
-    },
-    'JWT_REFRESH_SECRET environment variable is required': {
-      status: 500,
-      message: 'Server configuration error',
-    },
-  };
+function handleError(res: Response, error: unknown): void {
+  if (error instanceof AppError) {
+    res.status(error.status).json({ success: false, error: error.message });
+    return;
+  }
 
-  return errorMap[error.message] || { status: 500, message: 'An error occurred' };
+  if (error instanceof Error) {
+    res.status(500).json({ success: false, error: 'Internal server error' });
+    return;
+  }
+
+  res.status(500).json({ success: false, error: 'An unknown error occurred' });
 }
 
 export const AuthController = {
@@ -71,14 +39,13 @@ export const AuthController = {
    */
   async register(req: AuthRequest, res: Response): Promise<void> {
     try {
-      // Validate request body
-      const validatedData: RegisterRequest = registerSchema.parse(req.body);
+      const validatedData = req.body as RegisterRequest;
 
       // Register user
       const result = await AuthService.register(validatedData);
 
-      // Create audit log (non-blocking)
-      void AuthService.createAuditLog({
+      // Create audit log safely backgrounded
+      AuthService.createAuditLog({
         userId: result.user.id,
         action: 'register',
         resource: 'user',
@@ -86,7 +53,7 @@ export const AuthController = {
         ipAddress: req.ip,
         userAgent: req.headers['user-agent'],
         success: true,
-      });
+      }).catch((err) => console.error('Failed to log audit register success:', err));
 
       // Send response
       const response: AuthResponse = {
@@ -95,14 +62,6 @@ export const AuthController = {
       };
       res.status(201).json(response);
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
       if (error instanceof Error) {
         // Create audit log for failed registration (non-blocking)
         void AuthService.createAuditLog({
@@ -112,19 +71,9 @@ export const AuthController = {
           userAgent: req.headers['user-agent'],
           success: false,
           metadata: { error: error.message },
-        });
-
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
+        }).catch((err) => console.error('Failed to log audit register failure:', err));
       }
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -133,14 +82,13 @@ export const AuthController = {
    */
   async login(req: AuthRequest, res: Response): Promise<void> {
     try {
-      // Validate request body
-      const validatedData: LoginRequest = loginSchema.parse(req.body);
+      const validatedData = req.body as LoginRequest;
 
       // Login user
       const result = await AuthService.login(validatedData);
 
-      // Create audit log (non-blocking)
-      void AuthService.createAuditLog({
+      // Create audit log safely backgrounded
+      AuthService.createAuditLog({
         userId: result.user.id,
         action: 'login',
         resource: 'user',
@@ -148,7 +96,7 @@ export const AuthController = {
         ipAddress: req.ip,
         userAgent: req.headers['user-agent'],
         success: true,
-      });
+      }).catch((err) => console.error('Failed to log audit login success:', err));
 
       // Send response
       const response: AuthResponse = {
@@ -157,36 +105,17 @@ export const AuthController = {
       };
       res.status(200).json(response);
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
       if (error instanceof Error) {
-        // Create audit log for failed login (non-blocking)
-        void AuthService.createAuditLog({
+        AuthService.createAuditLog({
           action: 'login',
           resource: 'user',
           ipAddress: req.ip,
           userAgent: req.headers['user-agent'],
           success: false,
           metadata: { error: error.message },
-        });
-
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
+        }).catch((err) => console.error('Failed to log audit login failure:', err));
       }
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -195,22 +124,18 @@ export const AuthController = {
    */
   async logout(req: AuthRequest, res: Response): Promise<void> {
     try {
-      // Validate request body with Zod
-      const validatedData: RefreshTokenRequest = refreshTokenSchema.parse(req.body);
+      const validatedData = req.body as RefreshTokenRequest;
 
       if (!req.user) {
-        res.status(401).json({
-          success: false,
-          error: 'Unauthorized',
-        });
+        res.status(401).json({ success: false, error: 'Unauthorized' });
         return;
       }
 
       // Logout user (invalidate refresh token)
       await AuthService.logout(validatedData.refreshToken, req.user.userId);
 
-      // Create audit log (non-blocking)
-      void AuthService.createAuditLog({
+      // Create audit log safely backgrounded
+      AuthService.createAuditLog({
         userId: req.user.userId,
         action: 'logout',
         resource: 'user',
@@ -218,46 +143,25 @@ export const AuthController = {
         ipAddress: req.ip,
         userAgent: req.headers['user-agent'],
         success: true,
-      });
+      }).catch((err) => console.error('Failed to log audit logout success:', err));
 
       res.status(200).json({
         success: true,
         message: 'Logged out successfully',
       });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
+      if (req.user && error instanceof Error) {
+        AuthService.createAuditLog({
+          userId: req.user.userId,
+          action: 'logout',
+          resource: 'user',
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent'],
           success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
+          metadata: { error: error.message },
+        }).catch((err) => console.error('Failed to log audit logout failure:', err));
       }
-      if (error instanceof Error) {
-        // Create audit log for failed logout (non-blocking)
-        if (req.user) {
-          void AuthService.createAuditLog({
-            userId: req.user.userId,
-            action: 'logout',
-            resource: 'user',
-            ipAddress: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: false,
-            metadata: { error: error.message },
-          });
-        }
-
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
-      }
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -266,59 +170,42 @@ export const AuthController = {
    */
   async refresh(req: AuthRequest, res: Response): Promise<void> {
     try {
-      // Validate request body
-      const validatedData: RefreshTokenRequest = refreshTokenSchema.parse(req.body);
+      const validatedData = req.body as RefreshTokenRequest;
 
-      // Refresh access token
+      // Refresh access token and pull verified userId back
       const result = await AuthService.refreshAccessToken(validatedData.refreshToken);
 
-      // Create audit log (non-blocking)
-      void AuthService.createAuditLog({
-        userId: result.accessToken ? undefined : undefined, // We don't have userId from refresh
+      // Create audit log with extracted userId context safely backgrounded
+      AuthService.createAuditLog({
+        userId: result.userId,
         action: 'refresh',
         resource: 'token',
         ipAddress: req.ip,
         userAgent: req.headers['user-agent'],
         success: true,
-      });
+      }).catch((err) => console.error('Failed to log audit token refresh success:', err));
 
-      // Send response
+      // Send response without structural pollution
       const response: TokenRefreshResponse = {
         success: true,
-        data: result,
+        data: {
+          accessToken: result.accessToken,
+          refreshToken: result.refreshToken,
+        },
       };
       res.status(200).json(response);
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
       if (error instanceof Error) {
-        // Create audit log for failed refresh (non-blocking)
-        void AuthService.createAuditLog({
+        AuthService.createAuditLog({
           action: 'refresh',
           resource: 'token',
           ipAddress: req.ip,
           userAgent: req.headers['user-agent'],
           success: false,
           metadata: { error: error.message },
-        });
-
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
+        }).catch((err) => console.error('Failed to log audit token refresh failure:', err));
       }
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -328,18 +215,15 @@ export const AuthController = {
   async me(req: AuthRequest, res: Response): Promise<void> {
     try {
       if (!req.user) {
-        res.status(401).json({
-          success: false,
-          error: 'Unauthorized',
-        });
+        res.status(401).json({ success: false, error: 'Unauthorized' });
         return;
       }
 
       // Get current user
       const user = await AuthService.getCurrentUser(req.user.userId);
 
-      // Create audit log (non-blocking)
-      void AuthService.createAuditLog({
+      // Create audit log safely backgrounded
+      AuthService.createAuditLog({
         userId: user.id,
         action: 'me',
         resource: 'user',
@@ -347,7 +231,7 @@ export const AuthController = {
         ipAddress: req.ip,
         userAgent: req.headers['user-agent'],
         success: true,
-      });
+      }).catch((err) => console.error('Failed to log audit get profile success:', err));
 
       // Send response
       const response: UserResponse = {
@@ -356,32 +240,18 @@ export const AuthController = {
       };
       res.status(200).json(response);
     } catch (error) {
-      if (error instanceof Error) {
-        // Create audit log for failed me request (non-blocking)
-        if (req.user) {
-          void AuthService.createAuditLog({
-            userId: req.user.userId,
-            action: 'me',
-            resource: 'user',
-            ipAddress: req.ip,
-            userAgent: req.headers['user-agent'],
-            success: false,
-            metadata: { error: error.message },
-          });
-        }
-
-        // Return appropriate status based on error type
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
+      if (req.user && error instanceof Error) {
+        AuthService.createAuditLog({
+          userId: req.user.userId,
+          action: 'me',
+          resource: 'user',
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent'],
           success: false,
-          error: message,
-        });
-        return;
+          metadata: { error: error.message },
+        }).catch((err) => console.error('Failed to log audit get profile failure:', err));
       }
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 };

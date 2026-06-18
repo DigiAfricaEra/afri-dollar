@@ -43,3 +43,31 @@ export type UserResponse = {
   success: boolean;
   data: Omit<User, 'passwordHash'>;
 };
+
+export type JwtPayload = {
+  userId: string;
+  email: string;
+  role: string;
+  iat?: number;
+  exp?: number;
+};
+
+export class AppError extends Error {
+  constructor(
+    public status: number,
+    message: string
+  ) {
+    super(message);
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export interface TokenRefreshData {
+  accessToken: string;
+  refreshToken: string;
+  userId: string;
+}
+export interface CreatePayrollBatchOptions {
+  name: string;
+  walletId: string;
+}

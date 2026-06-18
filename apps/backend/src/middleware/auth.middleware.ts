@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 
 import { AuthService } from '../services/auth.service';
+import { AppError } from '../types';
 import type { JwtPayload } from '../types';
 
 /**
@@ -29,14 +30,16 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
 
     const token = authHeader.substring(7); // Remove 'Bearer ' prefix
 
-    // Verify token
+    // Verify token directly using domain mapping strategies inside the service
     const payload = AuthService.verifyAccessToken(token);
 
-    // Attach user payload to request
     req.user = payload;
-
     next();
   } catch (error) {
+    if (error instanceof AppError) {
+      res.status(error.status).json({ success: false, error: error.message });
+      return;
+    }
     res.status(401).json({
       success: false,
       error: 'Invalid or expired access token',
