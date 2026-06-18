@@ -3,12 +3,13 @@ import type { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../services/auth.service';
 import { AppError } from '../types';
 import type { JwtPayload } from '../types';
+import { UserRole } from '@prisma/client';
 
 /**
  * Role permissions mapping
  * Defines which permissions each role has access to
  */
-const ROLE_PERMISSIONS: Record<string, string[]> = {
+const ROLE_PERMISSIONS: Record<UserRole, string[]> = {
   ADMIN: ['*'], // Full access
   BUSINESS: [
     'wallet:read',
@@ -134,7 +135,19 @@ export const requirePermission = (permission: string) => {
       return;
     }
 
-    const userPermissions = ROLE_PERMISSIONS[req.user.role] || [];
+    const userPermissions = ROLE_PERMISSIONS[req.user.role];
+
+    // Log security event for unknown role
+    if (!userPermissions) {
+      console.error(
+        `Security: Unknown role '${req.user.role}' encountered for user ${req.user.userId} requesting permission '${permission}'`
+      );
+      res.status(403).json({
+        success: false,
+        error: 'Insufficient permissions',
+      });
+      return;
+    }
 
     // Check if user has the required permission
     // Admin has full access via '*' wildcard
