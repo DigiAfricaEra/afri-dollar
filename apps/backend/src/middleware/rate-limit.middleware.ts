@@ -18,32 +18,46 @@ const rateLimitExceededResponse = {
   },
 };
 
+const parsePositiveInt = (value: string | undefined, fallback: number): number => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+// Pre-parse all rate-limit env vars once at module load time.
+const windowMs = parsePositiveInt(process.env.RATE_LIMIT_WINDOW_MS, 15 * 60 * 1000);
+const authMax = parsePositiveInt(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS, 20);
+const apiMax = parsePositiveInt(process.env.RATE_LIMIT_MAX_REQUESTS, 100);
+const adminMax = parsePositiveInt(process.env.RATE_LIMIT_ADMIN_MAX_REQUESTS, 200);
+
 export const authLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '') || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_AUTH_MAX_REQUESTS ?? '') || 20,
+  windowMs,
+  max: authMax,
   standardHeaders: true,
   legacyHeaders: false,
   store: redisStore,
+  passOnStoreError: false,
   message: rateLimitExceededResponse,
   keyGenerator: (req) => `auth:${req.ip ?? 'unknown'}`,
 });
 
 export const apiLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '') || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS ?? '') || 100,
+  windowMs,
+  max: apiMax,
   standardHeaders: true,
   legacyHeaders: false,
   store: redisStore,
+  passOnStoreError: true,
   message: rateLimitExceededResponse,
   keyGenerator: (req) => `api:${req.ip ?? 'unknown'}`,
 });
 
 export const adminLimiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '') || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_ADMIN_MAX_REQUESTS ?? '') || 200,
+  windowMs,
+  max: adminMax,
   standardHeaders: true,
   legacyHeaders: false,
   store: redisStore,
+  passOnStoreError: false,
   message: rateLimitExceededResponse,
   keyGenerator: (req) => `admin:${req.ip ?? 'unknown'}`,
 });

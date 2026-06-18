@@ -21,6 +21,8 @@ const PORT = process.env.PORT || 3001;
 // Export prisma for easy access
 export { prisma };
 
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(helmet());
 app.use(cors());
@@ -76,12 +78,18 @@ async function startServer(): Promise<void> {
 void startServer();
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  void Promise.all([prisma.$disconnect(), redisClient.quit()]).then(() => process.exit(0));
-});
+// allSettled guarantees process.exit is always called even if one of the
+// disconnect/quit calls rejects — Promise.all would silently stall here.
+const shutdown = (signal: 'SIGTERM' | 'SIGINT'): void => {
+  console.log(`${signal} signal received: closing HTTP server`);
+  void Promise.allSettled([prisma.$disconnect(), redisClient.quit()]).then((results) => {
+    const hasFailure = results.some((r) => r.status === 'rejected');
+    if (hasFailure) {
+      console.error('❌ One or more shutdown tasks failed:', results);
+    }
+    process.exit(hasFailure ? 1 : 0);
+  });
+};
 
-process.on('SIGINT', () => {
-  console.log('SIGINT signal received: closing HTTP server');
-  void Promise.all([prisma.$disconnect(), redisClient.quit()]).then(() => process.exit(0));
-});
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
