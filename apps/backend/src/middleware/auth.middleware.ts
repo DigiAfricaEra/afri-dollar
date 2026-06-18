@@ -43,3 +43,28 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
     });
   }
 };
+
+/**
+ * Admin Middleware
+ * Restricts a route to users with the ADMIN role. Must run after `authMiddleware`
+ * so that `req.user` has been populated from a verified access token.
+ */
+export const adminMiddleware = (req: AuthRequest, res: Response, next: NextFunction): void => {
+  if (!req.user) {
+    res.status(401).json({
+      success: false,
+      error: 'Access token is required',
+    });
+    return;
+  }
+
+  if (req.user.role !== 'ADMIN') {
+    res.status(403).json({
+      success: false,
+      error: 'Admin privileges required',
+    });
+    return;
+  }
+
+  next();
+};
