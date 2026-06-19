@@ -1,5 +1,5 @@
-import jwt from 'jsonwebtoken';
 import type { UserRole } from '@prisma/client';
+import jwt from 'jsonwebtoken';
 
 import { AuthService } from '../../services/auth.service';
 
