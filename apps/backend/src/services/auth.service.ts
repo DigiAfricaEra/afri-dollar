@@ -2,7 +2,7 @@ import { createHash } from 'crypto';
 import { hash, compare } from 'bcrypt';
 import { addDays } from 'date-fns';
 import { sign, verify } from 'jsonwebtoken';
-import type { UserRole } from '@prisma/client';
+
 import prisma from '../config/database';
 import { AppError } from '../types';
 import type { RegisterRequest, TokenRefreshData, LoginRequest, JwtPayload } from '../types';
@@ -10,24 +10,6 @@ import type { RegisterRequest, TokenRefreshData, LoginRequest, JwtPayload } from
 const SALT_ROUNDS = 12;
 const ACCESS_TOKEN_EXPIRY = '15m';
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
-
-type UserWithoutPassword = Omit<
-  {
-    id: string;
-    email: string;
-    passwordHash: string | null;
-    phoneNumber: string | null;
-    walletAddress: string | null;
-    firstName: string | null;
-    lastName: string | null;
-    role: UserRole;
-    isVerified: boolean;
-    isActive: boolean;
-    createdAt: Date;
-    updatedAt: Date;
-  },
-  'passwordHash'
->;
 
 function validateJwtSecrets(): void {
   if (!process.env.JWT_SECRET || !process.env.JWT_REFRESH_SECRET) {
@@ -80,9 +62,7 @@ export const AuthService = {
     }
   },
 
-  async register(
-    data: RegisterRequest
-  ): Promise<{ user: UserWithoutPassword; tokens: { accessToken: string; refreshToken: string } }> {
+  async register(data: RegisterRequest) {
     const existingUser = await prisma.user.findUnique({
       where: { email: data.email },
     });
@@ -130,18 +110,16 @@ export const AuthService = {
       },
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { passwordHash: _pw, ...userWithoutPassword } = user;
-    void _pw;
 
     return {
-      user: userWithoutPassword as UserWithoutPassword,
+      user: userWithoutPassword,
       tokens: { accessToken, refreshToken },
     };
   },
 
-  async login(
-    data: LoginRequest
-  ): Promise<{ user: UserWithoutPassword; tokens: { accessToken: string; refreshToken: string } }> {
+  async login(data: LoginRequest) {
     const user = await prisma.user.findUnique({
       where: { email: data.email },
     });
@@ -176,11 +154,11 @@ export const AuthService = {
       },
     });
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { passwordHash: _pw, ...userWithoutPassword } = user;
-    void _pw;
 
     return {
-      user: userWithoutPassword as UserWithoutPassword,
+      user: userWithoutPassword,
       tokens: { accessToken, refreshToken },
     };
   },
@@ -264,7 +242,7 @@ export const AuthService = {
     }
   },
 
-  async getCurrentUser(userId: string): Promise<UserWithoutPassword> {
+  async getCurrentUser(userId: string) {
     const user = await prisma.user.findUnique({
       where: { id: userId },
     });
@@ -273,10 +251,10 @@ export const AuthService = {
       throw new AppError(404, 'User not found');
     }
 
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { passwordHash: _pw, ...userWithoutPassword } = user;
-    void _pw;
 
-    return userWithoutPassword as UserWithoutPassword;
+    return userWithoutPassword;
   },
 
   async createAuditLog(data: {
@@ -293,7 +271,7 @@ export const AuthService = {
     await prisma.auditLog.create({
       data: {
         ...rest,
-        metadata: (metadata as object) ?? null,
+        metadata: metadata as any,
       },
     });
   },
