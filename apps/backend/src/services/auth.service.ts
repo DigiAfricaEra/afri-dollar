@@ -63,7 +63,7 @@ export const AuthService = {
     }
   },
 
-  async register(data: RegisterRequest) {
+  async register(data: RegisterRequest, deviceInfo?: string) {
     const existingUser = await prisma.user.findUnique({
       where: { email: data.email },
     });
@@ -107,6 +107,7 @@ export const AuthService = {
       data: {
         userId: user.id,
         tokenHash: this.hashRefreshToken(refreshToken),
+        deviceInfo: deviceInfo ?? null,
         expiresAt: addDays(new Date(), REFRESH_TOKEN_EXPIRY_DAYS),
       },
     });
@@ -120,7 +121,7 @@ export const AuthService = {
     };
   },
 
-  async login(data: LoginRequest) {
+  async login(data: LoginRequest, deviceInfo?: string) {
     const user = await prisma.user.findUnique({
       where: { email: data.email },
     });
@@ -151,6 +152,7 @@ export const AuthService = {
       data: {
         userId: user.id,
         tokenHash: this.hashRefreshToken(refreshToken),
+        deviceInfo: deviceInfo ?? null,
         expiresAt: addDays(new Date(), REFRESH_TOKEN_EXPIRY_DAYS),
       },
     });
@@ -173,16 +175,24 @@ export const AuthService = {
       include: { user: true },
     });
 
+    // Reuse detection: token was already revoked — potential theft; revoke all tokens for this user
     if (tokenRecord && tokenRecord.isRevoked) {
       await prisma.refreshToken.updateMany({
-        where: { userId: tokenRecord.userId },
+        where: { userId: tokenRecord.userId, isRevoked: false },
         data: { isRevoked: true, revokedAt: new Date() },
       });
-      throw new AppError(401, 'Refresh token has been revoked');
+      throw new AppError(401, 'Refresh token reuse detected. All sessions have been revoked.');
     }
 
+    // Token not found in DB (was never issued or already cleaned up)
     if (!tokenRecord) {
-      throw new AppError(401, 'Invalid refresh token');
+      // We still have the payload from JWT verification, so we can revoke all tokens
+      // for the user as a precautionary measure against token theft
+      await prisma.refreshToken.updateMany({
+        where: { userId: payload.userId, isRevoked: false },
+        data: { isRevoked: true, revokedAt: new Date() },
+      });
+      throw new AppError(401, 'Invalid refresh token. All sessions have been revoked.');
     }
 
     if (tokenRecord.expiresAt < new Date()) {
@@ -193,12 +203,10 @@ export const AuthService = {
       throw new AppError(403, 'Account is inactive');
     }
 
+    // Rotate: revoke the current token
     await prisma.refreshToken.update({
       where: { id: tokenRecord.id },
-      data: {
-        isRevoked: true,
-        revokedAt: new Date(),
-      },
+      data: { isRevoked: true, revokedAt: new Date() },
     });
 
     const jwtPayload: Omit<JwtPayload, 'iat' | 'exp'> = {
@@ -210,10 +218,12 @@ export const AuthService = {
     const accessToken = this.generateAccessToken(jwtPayload);
     const newRefreshToken = this.generateRefreshToken(jwtPayload);
 
+    // Issue new token preserving device association
     await prisma.refreshToken.create({
       data: {
         userId: tokenRecord.userId,
         tokenHash: this.hashRefreshToken(newRefreshToken),
+        deviceInfo: tokenRecord.deviceInfo,
         expiresAt: addDays(new Date(), REFRESH_TOKEN_EXPIRY_DAYS),
       },
     });
@@ -221,24 +231,37 @@ export const AuthService = {
     return { accessToken, refreshToken: newRefreshToken, userId: tokenRecord.userId };
   },
 
-  async logout(refreshToken: string, userId: string): Promise<void> {
+  /**
+   * Revoke a single refresh token (device logout).
+   * If revokeAllDevices is true, all tokens for the user are revoked.
+   */
+  async logout(
+    refreshToken: string,
+    userId: string,
+    revokeAllDevices = false
+  ): Promise<void> {
     const tokenHash = this.hashRefreshToken(refreshToken);
 
     const tokenRecord = await prisma.refreshToken.findUnique({
       where: { tokenHash },
     });
 
-    if (tokenRecord) {
-      if (tokenRecord.userId !== userId) {
-        throw new AppError(401, 'Invalid refresh token');
-      }
+    if (tokenRecord && tokenRecord.userId !== userId) {
+      throw new AppError(401, 'Invalid refresh token');
+    }
 
+    if (revokeAllDevices) {
+      await prisma.refreshToken.updateMany({
+        where: { userId, isRevoked: false },
+        data: { isRevoked: true, revokedAt: new Date() },
+      });
+      return;
+    }
+
+    if (tokenRecord && !tokenRecord.isRevoked) {
       await prisma.refreshToken.update({
         where: { id: tokenRecord.id },
-        data: {
-          isRevoked: true,
-          revokedAt: new Date(),
-        },
+        data: { isRevoked: true, revokedAt: new Date() },
       });
     }
   },

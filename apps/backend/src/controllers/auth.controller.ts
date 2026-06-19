@@ -40,22 +40,20 @@ export const AuthController = {
   async register(req: AuthRequest, res: Response): Promise<void> {
     try {
       const validatedData = req.body as RegisterRequest;
+      const deviceInfo = req.headers['user-agent'];
 
-      // Register user
-      const result = await AuthService.register(validatedData);
+      const result = await AuthService.register(validatedData, deviceInfo);
 
-      // Create audit log safely backgrounded
       AuthService.createAuditLog({
         userId: result.user.id,
         action: 'register',
         resource: 'user',
         resourceId: result.user.id,
         ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
+        userAgent: deviceInfo,
         success: true,
       }).catch((err) => console.error('Failed to log audit register success:', err));
 
-      // Send response
       const response: AuthResponse = {
         success: true,
         data: result,
@@ -63,7 +61,6 @@ export const AuthController = {
       res.status(201).json(response);
     } catch (error) {
       if (error instanceof Error) {
-        // Create audit log for failed registration (non-blocking)
         void AuthService.createAuditLog({
           action: 'register',
           resource: 'user',
@@ -83,22 +80,20 @@ export const AuthController = {
   async login(req: AuthRequest, res: Response): Promise<void> {
     try {
       const validatedData = req.body as LoginRequest;
+      const deviceInfo = req.headers['user-agent'];
 
-      // Login user
-      const result = await AuthService.login(validatedData);
+      const result = await AuthService.login(validatedData, deviceInfo);
 
-      // Create audit log safely backgrounded
       AuthService.createAuditLog({
         userId: result.user.id,
         action: 'login',
         resource: 'user',
         resourceId: result.user.id,
         ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
+        userAgent: deviceInfo,
         success: true,
       }).catch((err) => console.error('Failed to log audit login success:', err));
 
-      // Send response
       const response: AuthResponse = {
         success: true,
         data: result,
@@ -120,24 +115,25 @@ export const AuthController = {
   },
 
   /**
-   * Logout a user
+   * Logout a user (device or all-device).
+   * Pass `allDevices: true` in the request body to revoke all sessions.
    */
   async logout(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const validatedData = req.body as RefreshTokenRequest;
+      const { refreshToken, allDevices } = req.body as RefreshTokenRequest & {
+        allDevices?: boolean;
+      };
 
       if (!req.user) {
         res.status(401).json({ success: false, error: 'Unauthorized' });
         return;
       }
 
-      // Logout user (invalidate refresh token)
-      await AuthService.logout(validatedData.refreshToken, req.user.userId);
+      await AuthService.logout(refreshToken, req.user.userId, allDevices === true);
 
-      // Create audit log safely backgrounded
       AuthService.createAuditLog({
         userId: req.user.userId,
-        action: 'logout',
+        action: allDevices ? 'logout_all_devices' : 'logout',
         resource: 'user',
         resourceId: req.user.userId,
         ipAddress: req.ip,
@@ -147,7 +143,7 @@ export const AuthController = {
 
       res.status(200).json({
         success: true,
-        message: 'Logged out successfully',
+        message: allDevices ? 'Logged out from all devices' : 'Logged out successfully',
       });
     } catch (error) {
       if (req.user && error instanceof Error) {
@@ -166,16 +162,14 @@ export const AuthController = {
   },
 
   /**
-   * Refresh access token
+   * Refresh access token (issues rotated token pair)
    */
   async refresh(req: AuthRequest, res: Response): Promise<void> {
     try {
       const validatedData = req.body as RefreshTokenRequest;
 
-      // Refresh access token and pull verified userId back
       const result = await AuthService.refreshAccessToken(validatedData.refreshToken);
 
-      // Create audit log with extracted userId context safely backgrounded
       AuthService.createAuditLog({
         userId: result.userId,
         action: 'refresh',
@@ -185,7 +179,6 @@ export const AuthController = {
         success: true,
       }).catch((err) => console.error('Failed to log audit token refresh success:', err));
 
-      // Send response without structural pollution
       const response: TokenRefreshResponse = {
         success: true,
         data: {
@@ -219,10 +212,8 @@ export const AuthController = {
         return;
       }
 
-      // Get current user
       const user = await AuthService.getCurrentUser(req.user.userId);
 
-      // Create audit log safely backgrounded
       AuthService.createAuditLog({
         userId: user.id,
         action: 'me',
@@ -233,7 +224,6 @@ export const AuthController = {
         success: true,
       }).catch((err) => console.error('Failed to log audit get profile success:', err));
 
-      // Send response
       const response: UserResponse = {
         success: true,
         data: user,

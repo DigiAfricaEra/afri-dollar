@@ -217,16 +217,18 @@ model RefreshToken {
   userId    String
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   
-  tokenHash String   @unique
-  isRevoked Boolean  @default(false)
-  revokedAt DateTime?
-  expiresAt DateTime
+  tokenHash  String   @unique
+  deviceInfo String?  // Stores user-agent or device fingerprint for device-scoped tokens
+  isRevoked  Boolean  @default(false)
+  revokedAt  DateTime?
+  expiresAt  DateTime
   
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([userId])
   @@index([tokenHash])
+  @@index([userId, deviceInfo])
 }
 
 // Audit log for compliance and security

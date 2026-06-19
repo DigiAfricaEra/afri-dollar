@@ -19,6 +19,15 @@ export type RefreshTokenRequest = {
   refreshToken: string;
 };
 
+export interface RefreshTokenRecord {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  deviceInfo?: string;
+  createdAt: Date;
+  revokedAt?: Date;
+}
+
 export type AuthResponse = {
   success: boolean;
   data: {
