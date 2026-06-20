@@ -1,10 +1,7 @@
-/**
- * Type Definitions
- * Contains shared TypeScript types for the backend
- */
 import type { User } from '@prisma/client';
 
 export * from './auth.types';
+export * from './wallet.types';
 
 export type RegisterRequest = {
   email: string;
@@ -22,6 +19,15 @@ export type LoginRequest = {
 export type RefreshTokenRequest = {
   refreshToken: string;
 };
+
+export interface RefreshTokenRecord {
+  id: string;
+  userId: string;
+  tokenHash: string;
+  deviceInfo?: string;
+  createdAt: Date;
+  revokedAt?: Date;
+}
 
 export type AuthResponse = {
   success: boolean;
@@ -43,3 +49,24 @@ export type UserResponse = {
   success: boolean;
   data: Omit<User, 'passwordHash'>;
 };
+
+export class AppError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+    this.name = 'AppError';
+  }
+}
+
+export interface TokenRefreshData {
+  accessToken: string;
+  refreshToken: string;
+  userId: string;
+}
+
+export interface CreatePayrollBatchOptions {
+  name: string;
+  walletId: string;
+}

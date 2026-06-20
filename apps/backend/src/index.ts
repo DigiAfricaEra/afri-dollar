@@ -8,10 +8,12 @@ import helmet from 'helmet';
 import prisma from './config/database';
 import redisClient from './config/redis';
 import { adminLimiter, apiLimiter, authLimiter } from './middleware/rate-limit.middleware';
+import { errorMiddleware } from './middleware/error.middleware';
 import authRouter from './routes/auth.routes';
 import fxRouter from './routes/fx.routes';
 import payrollRouter from './routes/payroll.routes';
 import treasuryRouter from './routes/treasury.routes';
+import walletRouter from './routes/wallet.routes';
 // Load backend-level .env file
 config({ path: path.resolve(__dirname, '../.env') });
 
@@ -58,6 +60,13 @@ app.use('/api/v1/payroll', apiLimiter, payrollRouter);
 // Treasury routes (admin only) — more permissive rate limit
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 app.use('/api/v1/treasury', adminLimiter, treasuryRouter);
+
+// Wallet routes
+// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+app.use('/api/v1/wallet', walletRouter);
+
+// Global error handler
+app.use(errorMiddleware);
 
 // Database connection check and server start
 async function startServer(): Promise<void> {

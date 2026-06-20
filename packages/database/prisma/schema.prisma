@@ -12,30 +12,32 @@ datasource db {
 
 enum UserRole {
   USER
+  BUSINESS
   ADMIN
+  AUDITOR
 }
 
 // User model for authentication and authorization
 model User {
-  id            String    @id @default(cuid())
-  email         String    @unique
+  id            String      @id @default(cuid())
+  email         String      @unique
   passwordHash  String?
-  phoneNumber   String?   @unique
-  walletAddress String?   @unique
+  phoneNumber   String?     @unique
+  walletAddress String?     @unique
   firstName     String?
   lastName      String?
-  isVerified    Boolean   @default(false)
-  isActive      Boolean   @default(true)
-  role          UserRole  @default(USER)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  role          UserRole    @default(USER)
+  isVerified    Boolean     @default(false)
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
   // Relations
-  business      Business?
-  wallets       Wallet[]
-  transactions  Transaction[]
-  kycRecords    KYCRecord[]
-  refreshTokens RefreshToken[]
+  business        Business?
+  wallets         Wallet[]
+  transactions    Transaction[]
+  kycRecords      KYCRecord[]
+  refreshTokens   RefreshToken[]
 
   @@index([email])
   @@index([walletAddress])
@@ -209,6 +211,26 @@ model ConversionQuote {
   @@index([fromAsset, toAsset])
 }
 
+// Refresh tokens for JWT authentication
+model RefreshToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  tokenHash  String   @unique
+  deviceInfo String?  // Stores user-agent or device fingerprint for device-scoped tokens
+  isRevoked  Boolean  @default(false)
+  revokedAt  DateTime?
+  expiresAt  DateTime
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@index([userId, deviceInfo])
+}
+
 // Audit log for compliance and security
 model AuditLog {
   id          String   @id @default(cuid())
@@ -265,20 +287,4 @@ model PayrollItem {
 
   @@index([payrollBatchId])
   @@index([status])
-}
-
-// Refresh token for JWT token rotation (stored as hash for security)
-model RefreshToken {
-  id           String   @id @default(cuid())
-  userId       String
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash    String   @unique
-  expiresAt    DateTime
-  isRevoked    Boolean  @default(false)
-  revokedAt    DateTime?
-
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-
-  @@index([userId])
 }

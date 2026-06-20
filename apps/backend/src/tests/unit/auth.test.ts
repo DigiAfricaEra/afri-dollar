@@ -1,4 +1,4 @@
-import { UserRole } from '@prisma/client';
+import type { UserRole } from '@prisma/client';
 import jwt from 'jsonwebtoken';
 
 import { AuthService } from '../../services/auth.service';
@@ -14,6 +14,7 @@ jest.mock('../../config/database', () => ({
       create: jest.fn(),
       findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     auditLog: {
       create: jest.fn(),
@@ -54,7 +55,7 @@ describe('AuthService Unit Tests', () => {
     const payload = {
       userId: 'user-123',
       email: 'test@example.com',
-      role: UserRole.USER,
+      role: 'USER' as UserRole,
     };
 
     it('should generate and verify access tokens', () => {
