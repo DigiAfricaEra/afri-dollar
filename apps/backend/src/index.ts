@@ -9,6 +9,7 @@ import prisma from './config/database';
 import { errorMiddleware } from './middleware/error.middleware';
 import authRouter from './routes/auth.routes';
 import fxRouter from './routes/fx.routes';
+import paymentRouter from './routes/payment.routes';
 import payrollRouter from './routes/payroll.routes';
 import treasuryRouter from './routes/treasury.routes';
 import walletRouter from './routes/wallet.routes';
@@ -48,6 +49,10 @@ app.use('/api/v1/auth', authRouter);
 // FX routes
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 app.use('/api/v1/fx', fxRouter);
+
+// Payment routes
+// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+app.use('/api/v1/payments', paymentRouter);
 
 // Payroll routes
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
