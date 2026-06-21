@@ -51,7 +51,6 @@ const mockUserFindUnique = prisma.user.findUnique as jest.Mock;
 const mockTransactionCreate = prisma.transaction.create as jest.Mock;
 const mockTransactionFindUnique = prisma.transaction.findUnique as jest.Mock;
 const mockTransactionFindMany = prisma.transaction.findMany as jest.Mock;
-const mockTransactionUpdate = prisma.transaction.update as jest.Mock;
 const mockTransactionUpdateMany = prisma.transaction.updateMany as jest.Mock;
 const mockAuditLogCreate = prisma.auditLog.create as jest.Mock;
 
@@ -276,6 +275,7 @@ describe('PaymentService', () => {
         completedAt: new Date(),
         errorMessage: null,
         userId: mockUserId,
+        metadata: { paymentType: 'cross_border' },
       };
       mockTransactionFindUnique.mockResolvedValue(mockTx);
 
@@ -298,6 +298,19 @@ describe('PaymentService', () => {
       mockTransactionFindUnique.mockResolvedValue({
         id: 'tx-1',
         userId: 'other-user',
+        metadata: { paymentType: 'cross_border' },
+      });
+
+      await expect(PaymentService.getPaymentStatus('tx-1', mockUserId)).rejects.toThrow(
+        'Payment not found'
+      );
+    });
+
+    it('should throw when transaction is not a cross-border payment', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        userId: mockUserId,
+        metadata: { paymentType: 'other' },
       });
 
       await expect(PaymentService.getPaymentStatus('tx-1', mockUserId)).rejects.toThrow(
@@ -307,59 +320,101 @@ describe('PaymentService', () => {
   });
 
   describe('cancelPayment', () => {
-    it('should cancel a created payment', async () => {
-      mockTransactionFindUnique.mockResolvedValue({
-        id: 'tx-1',
-        status: 'created',
-        userId: mockUserId,
-      });
-      const cancelledTx = {
-        id: 'tx-1',
-        status: 'cancelled',
-        stellarTxId: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        completedAt: null,
-        errorMessage: null,
-        userId: mockUserId,
-      };
-      mockTransactionUpdate.mockResolvedValue(cancelledTx);
+    const crossBorderMetadata = { paymentType: 'cross_border' };
+
+    it('should cancel a created payment atomically', async () => {
+      mockTransactionFindUnique
+        .mockResolvedValueOnce({
+          id: 'tx-1',
+          status: 'created',
+          userId: mockUserId,
+          metadata: crossBorderMetadata,
+        })
+        .mockResolvedValueOnce({
+          id: 'tx-1',
+          status: 'cancelled',
+          stellarTxId: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          completedAt: null,
+          errorMessage: null,
+          userId: mockUserId,
+          metadata: crossBorderMetadata,
+        });
+      mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
 
       const result = await PaymentService.cancelPayment('tx-1', mockUserId);
 
       expect(result.status).toBe('cancelled');
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith({
+        where: { id: 'tx-1', status: { in: ['created', 'pending'] } },
+        data: { status: 'cancelled' },
+      });
     });
 
-    it('should throw when cancelling a completed payment', async () => {
+    it('should throw when cancelling a completed payment (atomic check)', async () => {
       mockTransactionFindUnique.mockResolvedValue({
         id: 'tx-1',
         status: 'completed',
         userId: mockUserId,
+        metadata: crossBorderMetadata,
       });
+      mockTransactionUpdateMany.mockResolvedValue({ count: 0 });
 
       await expect(PaymentService.cancelPayment('tx-1', mockUserId)).rejects.toThrow(
         'Only created or pending payments can be cancelled'
       );
     });
 
-    it('should throw when cancelling a processing payment', async () => {
+    it('should throw when cancelling a processing payment (atomic check)', async () => {
       mockTransactionFindUnique.mockResolvedValue({
         id: 'tx-1',
         status: 'processing',
         userId: mockUserId,
+        metadata: crossBorderMetadata,
       });
+      mockTransactionUpdateMany.mockResolvedValue({ count: 0 });
 
       await expect(PaymentService.cancelPayment('tx-1', mockUserId)).rejects.toThrow(
         'Only created or pending payments can be cancelled'
+      );
+    });
+
+    it('should throw when transaction is not a cross-border payment', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: { paymentType: 'other' },
+      });
+
+      await expect(PaymentService.cancelPayment('tx-1', mockUserId)).rejects.toThrow(
+        'Payment not found'
       );
     });
   });
 
   describe('processPayment', () => {
+    const crossBorderMetadata = { paymentType: 'cross_border' };
+
     it('should throw when payment not found', async () => {
       mockTransactionFindUnique.mockResolvedValue(null);
 
       await expect(PaymentService.processPayment('nonexistent', mockUserId)).rejects.toThrow(
+        'Payment not found'
+      );
+    });
+
+    it('should throw when transaction is not a cross-border payment', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: { paymentType: 'other' },
+        wallet: { secretKeyEncrypted: mockSecretEncrypted },
+      });
+
+      await expect(PaymentService.processPayment('tx-1', mockUserId)).rejects.toThrow(
         'Payment not found'
       );
     });
@@ -369,6 +424,7 @@ describe('PaymentService', () => {
         id: 'tx-1',
         status: 'completed',
         userId: mockUserId,
+        metadata: crossBorderMetadata,
         wallet: { secretKeyEncrypted: mockSecretEncrypted },
       });
 
@@ -382,6 +438,7 @@ describe('PaymentService', () => {
         id: 'tx-1',
         status: 'created',
         userId: mockUserId,
+        metadata: crossBorderMetadata,
         wallet: { secretKeyEncrypted: mockSecretEncrypted },
       });
       mockTransactionUpdateMany.mockResolvedValue({ count: 0 });

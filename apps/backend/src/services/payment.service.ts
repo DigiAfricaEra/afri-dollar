@@ -205,6 +205,7 @@ export const PaymentService = {
         toAddress: options.destinationAddress,
         metadata: {
           purpose: options.purpose,
+          memo: options.memo || null,
           beneficiaryInfo: options.beneficiaryInfo || null,
           complianceChecks: {
             sanctionsScreening: complianceChecks.sanctionsScreening,
@@ -248,6 +249,11 @@ export const PaymentService = {
       throw new Error('Payment not found');
     }
 
+    const txMetadata = transaction.metadata as Record<string, unknown> | null;
+    if (txMetadata?.paymentType !== 'cross_border') {
+      throw new Error('Payment not found');
+    }
+
     if (transaction.status !== 'created') {
       throw new Error('Only created payments can be processed');
     }
@@ -277,11 +283,11 @@ export const PaymentService = {
       throw new Error('Wallet decryption failure');
     }
 
-    const sourceKeypair = Keypair.fromSecret(decryptedSecretKey);
-    const networkPassphrase =
-      process.env.STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
-
     try {
+      const sourceKeypair = Keypair.fromSecret(decryptedSecretKey);
+      const networkPassphrase =
+        process.env.STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
+
       const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
 
       const txBuilder = new TransactionBuilder(sourceAccount, {
@@ -357,6 +363,11 @@ export const PaymentService = {
       throw new Error('Payment not found');
     }
 
+    const metadata = transaction.metadata as Record<string, unknown> | null;
+    if (metadata?.paymentType !== 'cross_border') {
+      throw new Error('Payment not found');
+    }
+
     return mapToPaymentStatus(transaction);
   },
 
@@ -412,17 +423,29 @@ export const PaymentService = {
       throw new Error('Payment not found');
     }
 
-    if (transaction.status !== 'created' && transaction.status !== 'pending') {
+    const metadata = transaction.metadata as Record<string, unknown> | null;
+    if (metadata?.paymentType !== 'cross_border') {
+      throw new Error('Payment not found');
+    }
+
+    const updateResult = await prisma.transaction.updateMany({
+      where: {
+        id: paymentId,
+        status: { in: ['created', 'pending'] },
+      },
+      data: { status: 'cancelled' },
+    });
+
+    if (updateResult.count === 0) {
       throw new Error('Only created or pending payments can be cancelled');
     }
 
-    const updatedTx = await prisma.transaction.update({
+    const updatedTx = await prisma.transaction.findUnique({
       where: { id: paymentId },
-      data: { status: 'cancelled' },
     });
 
     await logAudit(userId, 'payment_cancel', paymentId, true);
 
-    return mapToPaymentStatus(updatedTx);
+    return mapToPaymentStatus(updatedTx!);
   },
 };

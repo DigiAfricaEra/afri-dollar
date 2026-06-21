@@ -172,4 +172,27 @@ describe('PaymentController', () => {
     expect(res.statusCode).toBe(500);
     expect(res.body).toEqual({ success: false, error: 'An error occurred' });
   });
+
+  it('returns 400 for invalid payment ID param', async () => {
+    const req = createAuthRequest({ params: { id: '' } });
+    const res = createMockResponse();
+
+    await PaymentController.getPaymentStatus(req, res as unknown as Response);
+
+    expect(res.statusCode).toBe(400);
+    expect((res.body as Record<string, unknown>).success).toBe(false);
+    expect((res.body as Record<string, unknown>).error).toBe('Validation error');
+    expect(mockGetPaymentStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for non-string walletId query param', async () => {
+    const req = createAuthRequest({ query: { walletId: ['a', 'b'] } });
+    const res = createMockResponse();
+
+    await PaymentController.getPaymentHistory(req, res as unknown as Response);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body).toEqual({ success: false, error: 'walletId must be a string' });
+    expect(mockGetPaymentHistory).not.toHaveBeenCalled();
+  });
 });

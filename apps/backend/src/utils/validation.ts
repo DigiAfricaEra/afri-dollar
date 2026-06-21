@@ -59,7 +59,7 @@ export const createCrossBorderPaymentSchema = z.object({
   beneficiaryInfo: z
     .object({
       name: z.string().min(1, 'Beneficiary name is required'),
-      country: z.string().min(2).max(3, 'Country must be a 2 or 3 letter code'),
+      country: z.string().regex(/^[A-Z]{2,3}$/, 'Country must be a 2 or 3 letter ISO code'),
     })
     .optional(),
 });

@@ -1,4 +1,5 @@
 import type { Response } from 'express';
+import { z } from 'zod';
 
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { PaymentService } from '../services/payment.service';
@@ -7,6 +8,15 @@ import type { CreateCrossBorderPaymentOptions } from '../types/payment.types';
 import { paymentIdParamSchema } from '../utils/validation';
 
 function handleError(res: Response, error: unknown): void {
+  if (error instanceof z.ZodError) {
+    res.status(400).json({
+      success: false,
+      error: 'Validation error',
+      details: error.errors,
+    });
+    return;
+  }
+
   if (error instanceof AppError) {
     res.status(error.status).json({ success: false, error: error.message });
     return;
@@ -115,8 +125,12 @@ export const PaymentController = {
       const userId = requireUser(req, res);
       if (!userId) return;
 
-      const walletId = req.query.walletId as string | undefined;
-      const history = await PaymentService.getPaymentHistory(userId, walletId);
+      const walletIdParam = req.query.walletId;
+      if (walletIdParam !== undefined && typeof walletIdParam !== 'string') {
+        res.status(400).json({ success: false, error: 'walletId must be a string' });
+        return;
+      }
+      const history = await PaymentService.getPaymentHistory(userId, walletIdParam);
 
       res.status(200).json({
         success: true,
