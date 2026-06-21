@@ -347,7 +347,7 @@ describe('PaymentService', () => {
 
       expect(result.status).toBe('cancelled');
       expect(mockTransactionUpdateMany).toHaveBeenCalledWith({
-        where: { id: 'tx-1', status: { in: ['created', 'pending'] } },
+        where: { id: 'tx-1', userId: mockUserId, status: { in: ['created', 'pending'] } },
         data: { status: 'cancelled' },
       });
     });

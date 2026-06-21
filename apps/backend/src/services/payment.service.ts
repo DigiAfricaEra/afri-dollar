@@ -431,6 +431,7 @@ export const PaymentService = {
     const updateResult = await prisma.transaction.updateMany({
       where: {
         id: paymentId,
+        userId,
         status: { in: ['created', 'pending'] },
       },
       data: { status: 'cancelled' },
