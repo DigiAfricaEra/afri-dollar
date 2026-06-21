@@ -10,6 +10,8 @@ jest.mock('../../config/database', () => ({
       findMany: jest.fn(),
       create: jest.fn(),
       updateMany: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
     },
     conversionQuote: {
       create: jest.fn(),
@@ -39,6 +41,8 @@ const mockExchangeRateFindFirst = prisma.exchangeRate.findFirst as jest.Mock;
 const mockExchangeRateFindMany = prisma.exchangeRate.findMany as jest.Mock;
 const mockExchangeRateCreate = prisma.exchangeRate.create as jest.Mock;
 const mockExchangeRateUpdateMany = prisma.exchangeRate.updateMany as jest.Mock;
+const mockExchangeRateFindUnique = prisma.exchangeRate.findUnique as jest.Mock;
+const mockExchangeRateUpdate = prisma.exchangeRate.update as jest.Mock;
 const mockConversionQuoteCreate = prisma.conversionQuote.create as jest.Mock;
 const mockConversionQuoteFindUnique = prisma.conversionQuote.findUnique as jest.Mock;
 const mockConversionQuoteUpdate = prisma.conversionQuote.update as jest.Mock;
@@ -299,7 +303,10 @@ describe('FXService', () => {
         },
       ]);
 
-      const result = await FXService.getConversionHistory('user-1', 'wallet-1', 10);
+      const result = await FXService.getConversionHistory('user-1', {
+        walletId: 'wallet-1',
+        limit: 10,
+      });
 
       expect(mockTransactionFindMany).toHaveBeenCalledWith({
         where: {
@@ -327,6 +334,197 @@ describe('FXService', () => {
           createdAt: new Date('2026-06-17T10:00:00.000Z'),
         },
       ]);
+    });
+  });
+
+  describe('getConversionHistory with cursor and date filters', () => {
+    it('filters by cursor', async () => {
+      mockTransactionFindMany.mockResolvedValue([]);
+
+      await FXService.getConversionHistory('user-1', {
+        cursor: 'txn-100',
+      });
+
+      expect(mockTransactionFindMany).toHaveBeenCalledWith({
+        where: {
+          userId: 'user-1',
+          type: 'exchange',
+          id: { lt: 'txn-100' },
+        },
+        orderBy: {
+          createdAt: 'desc',
+        },
+        take: 50,
+      });
+    });
+
+    it('filters by date range', async () => {
+      mockTransactionFindMany.mockResolvedValue([]);
+
+      await FXService.getConversionHistory('user-1', {
+        fromDate: '2026-06-01T00:00:00.000Z',
+        toDate: '2026-06-30T23:59:59.000Z',
+      });
+
+      expect(mockTransactionFindMany).toHaveBeenCalledWith({
+        where: {
+          userId: 'user-1',
+          type: 'exchange',
+          createdAt: {
+            gte: new Date('2026-06-01T00:00:00.000Z'),
+            lte: new Date('2026-06-30T23:59:59.000Z'),
+          },
+        },
+        orderBy: {
+          createdAt: 'desc',
+        },
+        take: 50,
+      });
+    });
+  });
+
+  describe('upsertRate', () => {
+    it('creates a new rate and deactivates the old one', async () => {
+      const newRate = {
+        id: 'rate-new',
+        fromAsset: 'USDC',
+        toAsset: 'NGN',
+        rate: '1600',
+        source: 'manual',
+        isActive: true,
+        validFrom: new Date('2026-06-17T12:00:00.000Z'),
+        validUntil: null,
+        createdAt: new Date('2026-06-17T12:00:00.000Z'),
+        updatedAt: new Date('2026-06-17T12:00:00.000Z'),
+      };
+
+      mockExchangeRateFindFirst.mockResolvedValue(newRate);
+      mockExchangeRateCreate.mockResolvedValue(newRate);
+      mockExchangeRateUpdateMany.mockResolvedValue({ count: 0 });
+      mockPrismaTransaction.mockImplementation(async (ops: unknown[]) =>
+        Promise.all(ops as Promise<unknown>[])
+      );
+
+      const result = await FXService.upsertRate({
+        fromAsset: 'usdc',
+        toAsset: 'ngn',
+        rate: '1600',
+      });
+
+      expect(mockExchangeRateUpdateMany).toHaveBeenCalledWith({
+        where: {
+          fromAsset: 'USDC',
+          toAsset: 'NGN',
+          isActive: true,
+        },
+        data: expect.objectContaining({
+          isActive: false,
+          validUntil: expect.any(Date),
+        }),
+      });
+      expect(mockExchangeRateCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          fromAsset: 'USDC',
+          toAsset: 'NGN',
+          rate: '1600',
+          source: 'manual',
+          isActive: true,
+        }),
+      });
+      expect(result).toEqual({
+        fromAsset: 'USDC',
+        toAsset: 'NGN',
+        rate: '1600',
+        source: 'manual',
+        validFrom: newRate.validFrom,
+        validUntil: null,
+      });
+    });
+
+    it('rejects identical from and to assets', async () => {
+      await expect(
+        FXService.upsertRate({
+          fromAsset: 'USDC',
+          toAsset: 'USDC',
+          rate: '1',
+        })
+      ).rejects.toThrow('From and to assets must be different');
+    });
+
+    it('rejects invalid rate values', async () => {
+      await expect(
+        FXService.upsertRate({
+          fromAsset: 'USDC',
+          toAsset: 'NGN',
+          rate: '-5',
+        })
+      ).rejects.toThrow('Amount must be a positive number');
+    });
+  });
+
+  describe('deactivateRate', () => {
+    it('deactivates an active exchange rate', async () => {
+      const activeRate = {
+        id: 'rate-1',
+        fromAsset: 'USDC',
+        toAsset: 'NGN',
+        rate: '1550',
+        source: 'manual',
+        isActive: true,
+        validFrom: new Date('2026-06-17T10:00:00.000Z'),
+        validUntil: null,
+        createdAt: new Date('2026-06-17T10:00:00.000Z'),
+        updatedAt: new Date('2026-06-17T10:00:00.000Z'),
+      };
+
+      mockExchangeRateFindUnique.mockResolvedValue(activeRate);
+      mockExchangeRateUpdate.mockResolvedValue({
+        ...activeRate,
+        isActive: false,
+        validUntil: new Date(),
+      });
+
+      await FXService.deactivateRate('rate-1');
+
+      expect(mockExchangeRateFindUnique).toHaveBeenCalledWith({
+        where: { id: 'rate-1' },
+      });
+      expect(mockExchangeRateUpdate).toHaveBeenCalledWith({
+        where: { id: 'rate-1' },
+        data: {
+          isActive: false,
+          validUntil: expect.any(Date),
+        },
+      });
+    });
+
+    it('throws if rate not found', async () => {
+      mockExchangeRateFindUnique.mockResolvedValue(null);
+
+      await expect(FXService.deactivateRate('nonexistent')).rejects.toThrow(
+        'Exchange rate not found'
+      );
+    });
+
+    it('throws if rate is already inactive', async () => {
+      const inactiveRate = {
+        id: 'rate-1',
+        fromAsset: 'USDC',
+        toAsset: 'NGN',
+        rate: '1550',
+        source: 'manual',
+        isActive: false,
+        validFrom: new Date('2026-06-17T10:00:00.000Z'),
+        validUntil: new Date(),
+        createdAt: new Date('2026-06-17T10:00:00.000Z'),
+        updatedAt: new Date('2026-06-17T10:00:00.000Z'),
+      };
+
+      mockExchangeRateFindUnique.mockResolvedValue(inactiveRate);
+
+      await expect(FXService.deactivateRate('rate-1')).rejects.toThrow(
+        'Exchange rate is already inactive'
+      );
     });
   });
 });
