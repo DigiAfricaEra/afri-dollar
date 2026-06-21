@@ -123,6 +123,7 @@ export const StellarService = {
       if (typeof options.cursor !== 'string' || options.cursor.trim().length === 0) {
         throw new AppError(400, 'Cursor must be a non-empty string');
       }
+      options.cursor = options.cursor.trim();
     }
 
     try {
