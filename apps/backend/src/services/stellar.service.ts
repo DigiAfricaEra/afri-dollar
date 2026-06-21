@@ -2,6 +2,7 @@ import { Horizon, StrKey } from '@stellar/stellar-sdk';
 
 import { AppError } from '../types';
 
+const STELLAR_NETWORK = process.env.STELLAR_NETWORK || 'testnet';
 const HORIZON_URL = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
 
 const horizonServer = new Horizon.Server(HORIZON_URL);
@@ -25,6 +26,14 @@ function getErrorMessage(error: unknown): string {
 }
 
 async function fundTestnetAccount(publicKey: string): Promise<void> {
+  if (STELLAR_NETWORK !== 'testnet') {
+    throw new AppError(400, 'Friendbot funding is only available on testnet');
+  }
+
+  if (!StrKey.isValidEd25519PublicKey(publicKey)) {
+    throw new AppError(400, 'Invalid Stellar public key');
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FRIENDBOT_TIMEOUT_MS);
 
@@ -104,13 +113,25 @@ export const StellarService = {
       throw new AppError(400, 'Invalid Stellar public key');
     }
 
+    if (options?.limit !== undefined) {
+      if (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 200) {
+        throw new AppError(400, 'Limit must be a positive integer between 1 and 200');
+      }
+    }
+
+    if (options?.cursor !== undefined) {
+      if (typeof options.cursor !== 'string' || options.cursor.trim().length === 0) {
+        throw new AppError(400, 'Cursor must be a non-empty string');
+      }
+    }
+
     try {
       let callBuilder = horizonServer.transactions().forAccount(publicKey);
 
-      if (options?.limit) {
+      if (options?.limit !== undefined) {
         callBuilder = callBuilder.limit(options.limit);
       }
-      if (options?.cursor) {
+      if (options?.cursor !== undefined) {
         callBuilder = callBuilder.cursor(options.cursor);
       }
 
