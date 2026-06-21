@@ -17,6 +17,9 @@ export interface StellarBalance {
   balance: string;
 }
 
+/**
+ * Safely extracts the error message from an unknown error value.
+ */
 function getErrorMessage(error: unknown): string {
   if (error && typeof error === 'object') {
     const errObj = error as Record<string, unknown>;
@@ -25,6 +28,10 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+/**
+ * Fund a Stellar testnet account using the Friendbot faucet.
+ * Only works when STELLAR_NETWORK is set to 'testnet'.
+ */
 async function fundTestnetAccount(publicKey: string): Promise<void> {
   if (STELLAR_NETWORK !== 'testnet') {
     throw new AppError(400, 'Friendbot funding is only available on testnet');
@@ -60,10 +67,17 @@ async function fundTestnetAccount(publicKey: string): Promise<void> {
 }
 
 export const StellarService = {
+  /**
+   * Returns the configured Horizon server instance.
+   */
   getHorizonServer(): Horizon.Server {
     return horizonServer;
   },
 
+  /**
+   * Fetches and returns balances for a Stellar account.
+   * Filters out liquidity pool shares, returning only native and asset balances.
+   */
   async getAccountBalances(publicKey: string): Promise<StellarBalance[]> {
     if (!StrKey.isValidEd25519PublicKey(publicKey)) {
       throw new AppError(400, 'Invalid Stellar public key');
@@ -105,6 +119,10 @@ export const StellarService = {
     }
   },
 
+  /**
+   * Fetches paginated transaction history for a Stellar account.
+   * Validates public key, limit (1-200), and cursor before querying Horizon.
+   */
   async getAccountTransactions(
     publicKey: string,
     options?: { limit?: number; cursor?: string }
@@ -151,6 +169,10 @@ export const StellarService = {
     }
   },
 
+  /**
+   * Funds a Stellar testnet account using the Friendbot faucet.
+   * Throws if not on testnet or if the public key is invalid.
+   */
   async fundTestnetAccount(publicKey: string): Promise<void> {
     return fundTestnetAccount(publicKey);
   },
