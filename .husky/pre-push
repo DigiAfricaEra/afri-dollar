@@ -26,12 +26,11 @@ fi
 
 # Security audit
 echo "▸ Running security audit..."
-npm audit --audit-level=high
-if [ $? -ne 0 ]; then
+npm audit --audit-level=high || {
   echo "⚠️  Security audit found high severity vulnerabilities."
   echo "   Please review and fix when possible. Run 'npm audit' for details."
   echo "   Continuing with push (security audit is non-blocking)."
-fi
+}
 
 # File size check
 echo "▸ Checking for large files..."
