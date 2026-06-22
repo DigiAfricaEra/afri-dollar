@@ -289,6 +289,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 For support, email dev.mes.anonfedora@gmail.com or open an issue in the repository.
 
+## Community
+
+Join the project community: [Telegram](https://t.me/DigiAfrcaEra/1)
+
 ## Acknowledgments
 
 - Stellar Development Foundation
@@ -301,6 +305,7 @@ For support, email dev.mes.anonfedora@gmail.com or open an issue in the reposito
 
 - [GitHub Organization Repository](https://github.com/DigiAfricaEra/afri-dollar)
 - [Telegram Channel](https://t.me/DigiAfrcaEra)
+- [Project Community](https://t.me/DigiAfrcaEra/1)
 - [Documentation](https://prickle-kryptops-023.notion.site/AfriDollar-Documentation-370b31338d4c803ab47edb04cc3928a3)
 - [Whitepaper](https://prickle-kryptops-023.notion.site/AfriDollar-Whitepaper-370b31338d4c80569f9ce2b0796f85c4)
 - [Compliance Policies](https://prickle-kryptops-023.notion.site/AfriDollar-Compliance-Policies-370b31338d4c807db9e0db2e746b2c98)

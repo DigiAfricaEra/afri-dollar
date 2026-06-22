@@ -2,6 +2,7 @@ import { Router } from 'express';
 
 import { AuthController } from '../controllers/auth.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { authSecurityMiddleware } from '../middleware/security.middleware';
 import { validate } from '../middleware/validation.middleware';
 import { loginSchema, registerSchema, refreshTokenSchema } from '../utils/validation';
 
@@ -17,9 +18,14 @@ const authRouter = Router();
  * Request body: { email: string, password: string, firstName?: string, lastName?: string, phoneNumber?: string }
  * Response: { success: boolean, data: { user: User, tokens: AuthTokens } }
  */
-authRouter.post('/register', validate(registerSchema), (req, res, next) => {
-  AuthController.register(req, res).catch(next);
-});
+authRouter.post(
+  '/register',
+  authSecurityMiddleware('register'),
+  validate(registerSchema),
+  (req, res, next) => {
+    AuthController.register(req, res).catch(next);
+  }
+);
 
 /**
  * POST /api/v1/auth/login
@@ -27,18 +33,29 @@ authRouter.post('/register', validate(registerSchema), (req, res, next) => {
  * Request body: { email: string, password: string }
  * Response: { success: boolean, data: { user: User, tokens: AuthTokens } }
  */
-authRouter.post('/login', validate(loginSchema), (req, res, next) => {
-  AuthController.login(req, res).catch(next);
-});
+authRouter.post(
+  '/login',
+  authSecurityMiddleware('login'),
+  validate(loginSchema),
+  (req, res, next) => {
+    AuthController.login(req, res).catch(next);
+  }
+);
 
 /**
  * POST /api/v1/auth/logout
  * Logout a user (requires valid JWT)
  * Invalidates refresh token
  */
-authRouter.post('/logout', authMiddleware, validate(refreshTokenSchema), (req, res, next) => {
-  AuthController.logout(req, res).catch(next);
-});
+authRouter.post(
+  '/logout',
+  authSecurityMiddleware('logout'),
+  authMiddleware,
+  validate(refreshTokenSchema),
+  (req, res, next) => {
+    AuthController.logout(req, res).catch(next);
+  }
+);
 
 /**
  * POST /api/v1/auth/refresh
@@ -46,9 +63,14 @@ authRouter.post('/logout', authMiddleware, validate(refreshTokenSchema), (req, r
  * Request body: { refreshToken: string }
  * Response: { success: boolean, data: { accessToken: string, refreshToken: string } }
  */
-authRouter.post('/refresh', validate(refreshTokenSchema), (req, res, next) => {
-  AuthController.refresh(req, res).catch(next);
-});
+authRouter.post(
+  '/refresh',
+  authSecurityMiddleware('refresh'),
+  validate(refreshTokenSchema),
+  (req, res, next) => {
+    AuthController.refresh(req, res).catch(next);
+  }
+);
 
 /**
  * GET /api/v1/auth/me

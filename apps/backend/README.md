@@ -127,6 +127,9 @@ BANKING_API_KEY=your_banking_api_key
 # Rate Limiting
 RATE_LIMIT_WINDOW_MS=900000
 RATE_LIMIT_MAX_REQUESTS=100
+
+# Security
+IP_REPUTATION_SERVICE_URL=https://example.com/ip-reputation
 ```
 
 3. Set up the database:
@@ -191,6 +194,12 @@ Authorization: Bearer <jwt_token>
 - `POST /api/v1/auth/logout` - User logout
 - `POST /api/v1/auth/refresh` - Refresh JWT token
 - `GET /api/v1/auth/me` - Get current user info
+
+#### Security
+
+- `GET /api/v1/security/metrics` - View blocked and flagged IP metrics
+- `GET /api/v1/security/blocked-ips` - List currently blocked IPs
+- `GET /api/v1/security/flagged-ips` - List flagged IPs and failed attempts
 
 #### Wallet Management
 
@@ -324,6 +333,9 @@ Deposit and withdrawal flows:
 - Per-endpoint rate limiting
 - IP-based throttling
 - Configurable limits via environment variables
+- Progressive lockouts for repeated login failures
+- Stricter auth limits for flagged IPs
+- Optional third-party IP reputation integration
 
 ### Data Protection
 
@@ -452,6 +464,7 @@ For backend-specific issues:
 
 - Email: dev.mes.anonfedora@gmail.com
 - GitHub Issues: [afri-dollar/issues](https://github.com/DigiAfricaEra/afri-dollar/issues)
+- Community: [Join the project community](https://t.me/DigiAfrcaEra/1)
 
 ## License
 

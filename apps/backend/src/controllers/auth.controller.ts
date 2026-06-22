@@ -6,6 +6,7 @@ import { Response } from 'express';
 
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { AuthService } from '../services/auth.service';
+import { SecurityService } from '../services/security.service';
 import { AppError } from '../types';
 import type {
   RegisterRequest,
@@ -33,6 +34,15 @@ function handleError(res: Response, error: unknown): void {
   res.status(500).json({ success: false, error: 'An unknown error occurred' });
 }
 
+function getUserAgent(headers: AuthRequest['headers']): string | undefined {
+  const userAgent = headers['user-agent'];
+  return typeof userAgent === 'string' ? userAgent : undefined;
+}
+
+function getRequestIp(req: AuthRequest): string {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
 export const AuthController = {
   /**
    * Register a new user
@@ -40,7 +50,7 @@ export const AuthController = {
   async register(req: AuthRequest, res: Response): Promise<void> {
     try {
       const validatedData = req.body as RegisterRequest;
-      const deviceInfo = req.headers['user-agent'];
+      const deviceInfo = getUserAgent(req.headers);
 
       const result = await AuthService.register(validatedData, deviceInfo);
 
@@ -65,7 +75,7 @@ export const AuthController = {
           action: 'register',
           resource: 'user',
           ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: getUserAgent(req.headers),
           success: false,
           metadata: { error: error.message },
         }).catch((err) => console.error('Failed to log audit register failure:', err));
@@ -80,9 +90,10 @@ export const AuthController = {
   async login(req: AuthRequest, res: Response): Promise<void> {
     try {
       const validatedData = req.body as LoginRequest;
-      const deviceInfo = req.headers['user-agent'];
+      const deviceInfo = getUserAgent(req.headers);
 
       const result = await AuthService.login(validatedData, deviceInfo);
+      await SecurityService.clearFailedAttempts(getRequestIp(req));
 
       AuthService.createAuditLog({
         userId: result.user.id,
@@ -101,14 +112,44 @@ export const AuthController = {
       res.status(200).json(response);
     } catch (error) {
       if (error instanceof Error) {
-        AuthService.createAuditLog({
-          action: 'login',
-          resource: 'user',
-          ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
-          success: false,
-          metadata: { error: error.message },
-        }).catch((err) => console.error('Failed to log audit login failure:', err));
+        let loggedFailure = false;
+        if (error.message === 'Invalid credentials') {
+          const failedAttempt = await SecurityService.recordFailedAttempt({
+            ip: getRequestIp(req),
+          });
+
+          if (failedAttempt.delayMs > 0) {
+            await SecurityService.sleep(failedAttempt.delayMs);
+          }
+
+          AuthService.createAuditLog({
+            action: 'login',
+            resource: 'user',
+            ipAddress: req.ip,
+            userAgent: getUserAgent(req.headers),
+            success: false,
+            metadata: {
+              error: error.message,
+              attempts: failedAttempt.record.attempts,
+              riskScore: failedAttempt.assessment.riskScore,
+              flagged: failedAttempt.assessment.flagged,
+              delayMs: failedAttempt.delayMs,
+              blockedUntil: failedAttempt.blockedUntil?.toISOString(),
+            },
+          }).catch((err) => console.error('Failed to log audit login failure:', err));
+          loggedFailure = true;
+        }
+
+        if (!loggedFailure) {
+          AuthService.createAuditLog({
+            action: 'login',
+            resource: 'user',
+            ipAddress: req.ip,
+            userAgent: getUserAgent(req.headers),
+            success: false,
+            metadata: { error: error.message },
+          }).catch((err) => console.error('Failed to log audit login failure:', err));
+        }
       }
       handleError(res, error);
     }
@@ -137,7 +178,7 @@ export const AuthController = {
         resource: 'user',
         resourceId: req.user.userId,
         ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
+        userAgent: getUserAgent(req.headers),
         success: true,
       }).catch((err) => console.error('Failed to log audit logout success:', err));
 
@@ -152,7 +193,7 @@ export const AuthController = {
           action: 'logout',
           resource: 'user',
           ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: getUserAgent(req.headers),
           success: false,
           metadata: { error: error.message },
         }).catch((err) => console.error('Failed to log audit logout failure:', err));
@@ -175,7 +216,7 @@ export const AuthController = {
         action: 'refresh',
         resource: 'token',
         ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
+        userAgent: getUserAgent(req.headers),
         success: true,
       }).catch((err) => console.error('Failed to log audit token refresh success:', err));
 
@@ -193,7 +234,7 @@ export const AuthController = {
           action: 'refresh',
           resource: 'token',
           ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: getUserAgent(req.headers),
           success: false,
           metadata: { error: error.message },
         }).catch((err) => console.error('Failed to log audit token refresh failure:', err));
@@ -220,7 +261,7 @@ export const AuthController = {
         resource: 'user',
         resourceId: user.id,
         ipAddress: req.ip,
-        userAgent: req.headers['user-agent'],
+        userAgent: getUserAgent(req.headers),
         success: true,
       }).catch((err) => console.error('Failed to log audit get profile success:', err));
 
@@ -236,7 +277,7 @@ export const AuthController = {
           action: 'me',
           resource: 'user',
           ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: getUserAgent(req.headers),
           success: false,
           metadata: { error: error.message },
         }).catch((err) => console.error('Failed to log audit get profile failure:', err));
