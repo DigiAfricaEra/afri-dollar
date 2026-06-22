@@ -7,6 +7,7 @@ import helmet from 'helmet';
 
 import prisma from './config/database';
 import { errorMiddleware } from './middleware/error.middleware';
+import auditRouter from './routes/audit.routes';
 import authRouter from './routes/auth.routes';
 import fxRouter from './routes/fx.routes';
 import paymentRouter from './routes/payment.routes';
@@ -66,6 +67,10 @@ app.use('/api/v1/stellar', stellarRouter);
 // Treasury routes (admin only)
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 app.use('/api/v1/treasury', treasuryRouter);
+
+// Audit routes (admin only)
+// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+app.use('/api/v1/audit', auditRouter);
 
 // Wallet routes
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
