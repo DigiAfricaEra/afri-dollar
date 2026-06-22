@@ -1,10 +1,12 @@
-'use client';
+﻿'use client';
 
 import { useRouter } from 'next/navigation';
 import React, { useState } from 'react';
 
 import { setAuthToken } from '../../../lib/auth';
 import { useStore } from '../../../store/useStore';
+
+const COMMUNITY_URL = 'https://t.me/DigiAfrcaEra/1';
 
 /**
  * LoginPage renders the user sign-in screen.
@@ -109,6 +111,17 @@ export default function LoginPage(): JSX.Element {
             {loading ? 'Signing In...' : 'Sign In'}
           </button>
         </form>
+        <div className="mt-6 text-center text-xs text-gray-600">
+          <p className="mb-1">Join the project community</p>
+          <a
+            href={COMMUNITY_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-blue-600 hover:underline"
+          >
+            https://t.me/DigiAfrcaEra/1
+          </a>
+        </div>
       </div>
     </div>
   );

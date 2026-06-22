@@ -1,7 +1,9 @@
-/**
+﻿/**
  * Home component renders the landing page for AfriDollar.
  * It provides an overview of the platform's core features.
  */
+const COMMUNITY_URL = 'https://t.me/DigiAfrcaEra/1';
+
 export default function Home(): JSX.Element {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-24">
@@ -23,6 +25,17 @@ export default function Home(): JSX.Element {
             <h2 className="text-2xl font-semibold mb-2">Treasury Management</h2>
             <p>Transparent and compliant digital dollar treasury operations</p>
           </div>
+        </div>
+        <div className="mt-10 rounded-lg border bg-white p-4 text-center">
+          <p className="text-sm text-gray-600 mb-2">Community</p>
+          <a
+            href={COMMUNITY_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-blue-600 font-medium hover:underline"
+          >
+            https://t.me/DigiAfrcaEra/1
+          </a>
         </div>
       </div>
     </main>
