@@ -1,6 +1,7 @@
 import type { Response, NextFunction } from 'express';
 
 import { AuditService } from '../services/audit.service';
+
 import type { AuthRequest } from './auth.middleware';
 
 export const auditMiddleware = (req: AuthRequest, res: Response, next: NextFunction): void => {
