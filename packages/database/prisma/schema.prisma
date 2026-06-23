@@ -248,8 +248,6 @@ model AuditLog {
   
   createdAt       DateTime @default(now())
 
-  @@index([userId])
-  @@index([action])
   @@index([createdAt])
   @@index([action, createdAt])
   @@index([userId, createdAt])

@@ -9,8 +9,8 @@ const auditLogQuerySchema = z.object({
   action: z.string().optional(),
   resource: z.string().optional(),
   success: z.coerce.boolean().optional(),
-  startDate: z.string().optional(),
-  endDate: z.string().optional(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(200).default(50),
 });
@@ -25,6 +25,7 @@ function handleError(res: Response, error: unknown): void {
     return;
   }
 
+  console.error('Audit query error:', error);
   res.status(500).json({
     success: false,
     error: 'Internal server error',

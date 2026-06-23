@@ -34,6 +34,13 @@ export interface PaginatedAuditLogs {
   };
 }
 
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`Query timed out after ${ms}ms`)), ms)
+  );
+  return Promise.race([promise, timeout]);
+}
+
 export const AuditService = {
   async log(data: {
     action: string;
@@ -51,7 +58,7 @@ export const AuditService = {
       await prisma.auditLog.create({
         data: {
           ...rest,
-          metadata: metadata as any,
+          metadata: metadata as Prisma.InputJsonValue,
         },
       });
     } catch (error) {
@@ -94,14 +101,19 @@ export const AuditService = {
     const limit = filters.limit;
     const skip = (page - 1) * limit;
 
+    const QUERY_TIMEOUT_MS = 30_000;
+
     const [data, total] = await Promise.all([
-      prisma.auditLog.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        skip,
-        take: limit,
-      }),
-      prisma.auditLog.count({ where }),
+      withTimeout(
+        prisma.auditLog.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+          skip,
+          take: limit,
+        }),
+        QUERY_TIMEOUT_MS
+      ),
+      withTimeout(prisma.auditLog.count({ where }), QUERY_TIMEOUT_MS),
     ]);
 
     return {
