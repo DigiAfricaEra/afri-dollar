@@ -47,3 +47,23 @@ export const addItemSchema = z.object({
 export const batchIdParamSchema = z.object({
   id: z.string().min(1, 'Batch ID is required'),
 });
+
+export const createCrossBorderPaymentSchema = z.object({
+  sourceWalletId: z.string().min(1, 'Source wallet ID is required'),
+  destinationAddress: z.string().length(56, 'Invalid Stellar address'),
+  amount: z.string().regex(/^\d+(\.\d+)?$/, 'Invalid amount format'),
+  assetCode: z.string().min(1).max(12),
+  assetIssuer: z.string().length(56).optional(),
+  memo: z.string().max(28).optional(),
+  purpose: z.string().min(1, 'Payment purpose is required'),
+  beneficiaryInfo: z
+    .object({
+      name: z.string().min(1, 'Beneficiary name is required'),
+      country: z.string().regex(/^[A-Z]{2,3}$/, 'Country must be a 2 or 3 letter ISO code'),
+    })
+    .optional(),
+});
+
+export const paymentIdParamSchema = z.object({
+  id: z.string().min(1, 'Payment ID is required'),
+});

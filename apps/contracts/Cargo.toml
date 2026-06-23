@@ -1,0 +1,37 @@
+# AfriDollar Soroban contracts workspace.
+#
+# New contracts live under `contracts/<name>` and shared libraries under
+# `crates/<name>`. Both directories are globbed below, so additional members
+# can be added without editing this file.
+[workspace]
+resolver = "2"
+members = ["contracts/*", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["AfriDollar <dev.mes.anonfedora@gmail.com>"]
+repository = "https://github.com/DigiAfricaEra/afri-dollar"
+
+[workspace.dependencies]
+# Pin the SDK at the workspace level so every contract builds against the same
+# version. Bump this single line to upgrade all contracts at once.
+soroban-sdk = "26.1.0"
+afri-contract-shared = { path = "crates/shared" }
+
+# Release profile tuned for small, deterministic WASM artifacts.
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+# Optional profile that keeps debug logs/symbols for local troubleshooting.
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

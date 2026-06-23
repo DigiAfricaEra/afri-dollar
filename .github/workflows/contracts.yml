@@ -1,0 +1,65 @@
+name: Contracts CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/contracts/**'
+      - '.github/workflows/contracts.yml'
+  pull_request:
+    paths:
+      - 'apps/contracts/**'
+      - '.github/workflows/contracts.yml'
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: contracts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: apps/contracts
+
+jobs:
+  contracts:
+    name: Build, Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32v1-none
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/contracts
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy (warnings as errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features
+
+      - name: Build workspace (release)
+        run: cargo build --release
+
+      - name: Build WASM artifacts
+        run: cargo build --release --target wasm32v1-none
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: soroban-wasm
+          path: apps/contracts/target/wasm32v1-none/release/*.wasm
+          if-no-files-found: error

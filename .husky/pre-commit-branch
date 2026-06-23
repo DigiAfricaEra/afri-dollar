@@ -1,0 +1,28 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+# Branch naming convention check
+echo "🔍 Checking branch naming convention..."
+
+# Get current branch name
+BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
+
+# Skip check for main, develop, and release branches
+if [ "$BRANCH_NAME" = "main" ] || [ "$BRANCH_NAME" = "develop" ] || [[ "$BRANCH_NAME" == release/* ]]; then
+  echo "✅ Branch naming convention check skipped for $BRANCH_NAME"
+  exit 0
+fi
+
+# Check branch name pattern: type/description
+# Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)/[a-z0-9-]+$"
+
+if [[ ! "$BRANCH_NAME" =~ $PATTERN ]]; then
+  echo "❌ Branch name '$BRANCH_NAME' does not follow the naming convention."
+  echo "   Expected format: type/description (e.g., feat/add-user-authentication)"
+  echo "   Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+  echo "   Use lowercase letters, numbers, and hyphens in the description."
+  exit 1
+fi
+
+echo "✅ Branch naming convention check passed for '$BRANCH_NAME'"

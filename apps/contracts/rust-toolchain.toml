@@ -1,0 +1,8 @@
+# Soroban SDK 26 requires the `wasm32v1-none` build target (Rust 1.84+).
+# The older `wasm32-unknown-unknown` target is unsupported on modern Rust
+# because it enables WASM features the Soroban environment cannot run.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32v1-none"]
+profile = "minimal"

@@ -16,6 +16,36 @@ if [ $? -ne 0 ]; then
   exit 1
 fi
 
+# Tests
+echo "▸ Running tests..."
+npm run test
+if [ $? -ne 0 ]; then
+  echo "❌ Tests failed. Please fix test failures before pushing."
+  exit 1
+fi
+
+# Dependency check
+echo "▸ Checking for unused dependencies..."
+if command -v depcheck &> /dev/null; then
+  npx depcheck
+  if [ $? -ne 0 ]; then
+    echo "⚠️  Dependency check found unused dependencies."
+    echo "   Please review and remove unused dependencies when possible."
+    echo "   Continuing with push (dependency check is non-blocking)."
+  fi
+else
+  echo "⚠️  depcheck not installed. Skipping dependency check."
+  echo "   Install it with: npm install -g depcheck"
+fi
+
+# Duplicate code check
+echo "▸ Checking for duplicate code..."
+npx jscpd ./apps ./packages --threshold 5 --ignore "node_modules,dist,.next,coverage"
+if [ $? -ne 0 ]; then
+  echo "❌ Found duplicate code. Please refactor to reduce code duplication."
+  exit 1
+fi
+
 # Build
 echo "▸ Building project..."
 npm run build

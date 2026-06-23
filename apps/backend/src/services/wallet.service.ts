@@ -5,40 +5,7 @@ import { AppError } from '../types';
 import type { CreateWalletOptions, WalletWithKeys } from '../types';
 import { encrypt } from '../utils/crypto';
 
-const FRIENDBOT_URL = 'https://friendbot.stellar.org';
-const FRIENDBOT_TIMEOUT_MS = 30_000;
-
-async function fundTestnetAccount(publicKey: string): Promise<void> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FRIENDBOT_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(`${FRIENDBOT_URL}?addr=${publicKey}`, {
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new AppError(502, `Friendbot funding failed: ${response.status} ${body}`);
-    }
-  } catch (error) {
-    if (error instanceof AppError) {
-      throw error;
-    }
-
-    if (error instanceof DOMException && error.name === 'AbortError') {
-      throw new AppError(504, 'Friendbot funding request timed out');
-    }
-
-    if (error instanceof TypeError) {
-      throw new AppError(503, 'Friendbot funding failed: network error');
-    }
-
-    throw new AppError(502, `Friendbot funding failed: ${String(error)}`);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
+import { StellarService } from './stellar.service';
 
 export const WalletService = {
   async createWallet(options: CreateWalletOptions): Promise<WalletWithKeys> {
@@ -57,7 +24,7 @@ export const WalletService = {
     const secretKeyEncrypted = encrypt(secretKey);
 
     if (options.network === 'testnet') {
-      await fundTestnetAccount(publicKey);
+      await StellarService.fundTestnetAccount(publicKey);
     }
 
     const wallet = await prisma.wallet.create({

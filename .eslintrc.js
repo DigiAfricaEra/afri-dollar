@@ -32,6 +32,11 @@ module.exports = {
     '@typescript-eslint/no-explicit-any': 'error',
     '@typescript-eslint/no-floating-promises': 'error',
     '@typescript-eslint/await-thenable': 'error',
+    '@typescript-eslint/no-misused-promises': 'error',
+    '@typescript-eslint/strict-boolean-expressions': 'warn',
+    '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+    '@typescript-eslint/prefer-nullish-coalescing': 'warn',
+    '@typescript-eslint/prefer-optional-chain': 'warn',
     'import/order': [
       'error',
       {
@@ -41,6 +46,10 @@ module.exports = {
       },
     ],
     'no-console': ['warn', { allow: ['warn', 'error'] }],
+    complexity: ['warn', 20],
+    'max-depth': ['warn', 5],
+    'max-params': ['warn', 5],
+    'max-lines-per-function': ['warn', 100],
   },
   settings: {
     'import/resolver': {

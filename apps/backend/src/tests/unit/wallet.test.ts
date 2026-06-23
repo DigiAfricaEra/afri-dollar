@@ -24,6 +24,12 @@ jest.mock('@stellar/stellar-sdk', () => ({
   Keypair: {
     random: jest.fn(),
   },
+  Horizon: {
+    Server: jest.fn(),
+  },
+  StrKey: {
+    isValidEd25519PublicKey: jest.fn().mockReturnValue(true),
+  },
 }));
 
 jest.mock('../../utils/crypto', () => ({
@@ -191,7 +197,7 @@ describe('WalletService', () => {
       expect(mockWalletCreate).not.toHaveBeenCalled();
     });
 
-    it('should throw 503 on network error', async () => {
+    it('should throw 502 on network error', async () => {
       mockUserFindUnique.mockResolvedValue({
         id: 'user-1',
         email: 'test@example.com',
@@ -205,8 +211,8 @@ describe('WalletService', () => {
           network: 'testnet',
         })
       ).rejects.toMatchObject({
-        status: 503,
-        message: 'Friendbot funding failed: network error',
+        status: 502,
+        message: 'Friendbot funding failed: fetch failed',
       });
 
       expect(mockWalletCreate).not.toHaveBeenCalled();
@@ -227,7 +233,7 @@ describe('WalletService', () => {
         })
       ).rejects.toMatchObject({
         status: 502,
-        message: 'Friendbot funding failed: Error: Something unexpected',
+        message: 'Friendbot funding failed: Something unexpected',
       });
 
       expect(mockWalletCreate).not.toHaveBeenCalled();

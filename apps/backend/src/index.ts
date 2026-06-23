@@ -5,17 +5,26 @@ import { config } from 'dotenv';
 import express, { json, urlencoded } from 'express';
 import helmet from 'helmet';
 
+// Express's RequestHandler uses `any` as default generic params, which triggers
+// @typescript-eslint/no-unsafe-argument. This interface provides non-any types.
+interface MountableRouter {
+  (req: express.Request, res: express.Response, next: express.NextFunction): void;
+}
+
 import prisma from './config/database';
 import { errorMiddleware } from './middleware/error.middleware';
+import auditRouter from './routes/audit.routes';
 import authRouter from './routes/auth.routes';
-import fxRouter, { adminFxRouter } from './routes/fx.routes';
+
 import payrollRouter from './routes/payroll.routes';
+import stellarRouter from './routes/stellar.routes';
 import treasuryRouter from './routes/treasury.routes';
 import walletRouter from './routes/wallet.routes';
 // Load backend-level .env file
 config({ path: path.resolve(__dirname, '../.env') });
 
 const app = express();
+app.set('trust proxy', true);
 const PORT = process.env.PORT || 3001;
 
 // Export prisma for easy access
@@ -42,28 +51,32 @@ app.get('/api/v1', (_req, res) => {
 });
 
 // Auth routes
-// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/auth', authRouter);
+app.use('/api/v1/auth', authRouter as MountableRouter);
 
 // FX routes
-// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/fx', fxRouter);
+app.use('/api/v1/fx', fxRouter as MountableRouter);
+
+// Payment routes
+app.use('/api/v1/payments', paymentRouter as MountableRouter);
 
 // Admin FX routes
 // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
 app.use('/api/v1/admin/fx', adminFxRouter);
 
 // Payroll routes
-// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/payroll', payrollRouter);
+app.use('/api/v1/payroll', payrollRouter as MountableRouter);
+
+// Stellar routes
+app.use('/api/v1/stellar', stellarRouter as MountableRouter);
 
 // Treasury routes (admin only)
-// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/treasury', treasuryRouter);
+app.use('/api/v1/treasury', treasuryRouter as MountableRouter);
+
+// Audit routes (admin only)
+app.use('/api/v1/audit', auditRouter as MountableRouter);
 
 // Wallet routes
-// eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-app.use('/api/v1/wallet', walletRouter);
+app.use('/api/v1/wallet', walletRouter as MountableRouter);
 
 // Global error handler
 app.use(errorMiddleware);

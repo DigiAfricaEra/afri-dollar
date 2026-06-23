@@ -1,0 +1,21 @@
+[package]
+name = "counter"
+description = "Sample AfriDollar Soroban contract demonstrating init, storage, events and tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# `cdylib` produces the WASM artifact; `rlib` lets other crates/tests link it.
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+afri-contract-shared = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

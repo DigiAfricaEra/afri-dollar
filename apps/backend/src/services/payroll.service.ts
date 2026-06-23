@@ -1,6 +1,5 @@
 import { PayrollBatch, PayrollItem as DbPayrollItem, Prisma } from '@afri-dollar/database';
 import {
-  Horizon,
   Keypair,
   Networks,
   Operation,
@@ -12,6 +11,8 @@ import {
 
 import prisma from '../config/database';
 import { decrypt } from '../utils/crypto';
+
+import { StellarService } from './stellar.service';
 
 export interface CreatePayrollBatchOptions {
   name: string;
@@ -39,9 +40,7 @@ export interface ProcessPayrollResult {
   items: PayrollItem[];
 }
 
-// Initialise Stellar Horizon server client
-const horizonUrl = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
-const server = new Horizon.Server(horizonUrl);
+const server = StellarService.getHorizonServer();
 
 /**
  * Safely extracts error messages from a Stellar Horizon response.
