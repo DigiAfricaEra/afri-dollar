@@ -706,10 +706,6 @@ export const FXService = {
       where.walletId = options.walletId;
     }
 
-    if (options?.cursor) {
-      where.id = { lt: options.cursor };
-    }
-
     if (options?.fromDate || options?.toDate) {
       const createdAtFilter: Record<string, Date> = {};
       if (options?.fromDate) {
@@ -723,10 +719,9 @@ export const FXService = {
 
     const transactions = await prisma.transaction.findMany({
       where,
-      orderBy: {
-        createdAt: 'desc',
-      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit,
+      ...(options?.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
     });
 
     return transactions.map(mapHistoryItem);
@@ -743,40 +738,33 @@ export const FXService = {
     const rate = normaliseNumericString(data.rate, DEFAULT_RATE_PRECISION);
     const validFrom = new Date();
 
-    await prisma.$transaction([
-      prisma.exchangeRate.updateMany({
-        where: {
-          fromAsset,
-          toAsset,
-          isActive: true,
-        },
-        data: {
-          isActive: false,
-          validUntil: validFrom,
-        },
-      }),
-      prisma.exchangeRate.create({
-        data: {
-          fromAsset,
-          toAsset,
-          rate,
-          source: 'manual',
-          isActive: true,
-          validFrom,
-        },
-      }),
-    ]);
+    const newRate = await prisma.$transaction(
+      async (client) => {
+        await client.exchangeRate.updateMany({
+          where: {
+            fromAsset,
+            toAsset,
+            isActive: true,
+          },
+          data: {
+            isActive: false,
+            validUntil: validFrom,
+          },
+        });
 
-    const newRate = await prisma.exchangeRate.findFirst({
-      where: {
-        fromAsset,
-        toAsset,
-        isActive: true,
+        return client.exchangeRate.create({
+          data: {
+            fromAsset,
+            toAsset,
+            rate,
+            source: 'manual',
+            isActive: true,
+            validFrom,
+          },
+        });
       },
-      orderBy: {
-        validFrom: 'desc',
-      },
-    });
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    );
 
     if (!newRate) {
       throw new Error('Failed to create exchange rate');

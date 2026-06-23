@@ -314,9 +314,7 @@ describe('FXService', () => {
           type: 'exchange',
           walletId: 'wallet-1',
         },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: 10,
       });
       expect(result).toEqual([
@@ -349,12 +347,11 @@ describe('FXService', () => {
         where: {
           userId: 'user-1',
           type: 'exchange',
-          id: { lt: 'txn-100' },
         },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: 50,
+        cursor: { id: 'txn-100' },
+        skip: 1,
       });
     });
 
@@ -375,9 +372,7 @@ describe('FXService', () => {
             lte: new Date('2026-06-30T23:59:59.000Z'),
           },
         },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: 50,
       });
     });
@@ -398,11 +393,10 @@ describe('FXService', () => {
         updatedAt: new Date('2026-06-17T12:00:00.000Z'),
       };
 
-      mockExchangeRateFindFirst.mockResolvedValue(newRate);
       mockExchangeRateCreate.mockResolvedValue(newRate);
       mockExchangeRateUpdateMany.mockResolvedValue({ count: 0 });
-      mockPrismaTransaction.mockImplementation(async (ops: unknown[]) =>
-        Promise.all(ops as Promise<unknown>[])
+      mockPrismaTransaction.mockImplementation(
+        async (callback: (client: typeof prisma) => unknown) => callback(prisma)
       );
 
       const result = await FXService.upsertRate({

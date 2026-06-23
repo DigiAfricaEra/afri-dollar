@@ -20,13 +20,18 @@ const convertSchema = z.object({
   walletId: z.string().min(1, 'Wallet ID is required'),
 });
 
-const historySchema = z.object({
-  walletId: z.string().optional(),
-  limit: z.coerce.number().int().positive().max(100).optional(),
-  cursor: z.string().optional(),
-  fromDate: z.string().optional(),
-  toDate: z.string().optional(),
-});
+const historySchema = z
+  .object({
+    walletId: z.string().optional(),
+    limit: z.coerce.number().int().positive().max(100).optional(),
+    cursor: z.string().optional(),
+    fromDate: z.string().datetime().optional(),
+    toDate: z.string().datetime().optional(),
+  })
+  .refine((v) => !v.fromDate || !v.toDate || new Date(v.fromDate) <= new Date(v.toDate), {
+    message: 'fromDate must be less than or equal to toDate',
+    path: ['fromDate'],
+  });
 
 const upsertRateSchema = z.object({
   fromAsset: z.string().min(1, 'From asset is required'),
