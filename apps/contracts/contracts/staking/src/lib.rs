@@ -15,19 +15,23 @@
 //! stakes only" *correctly*:
 //!
 //! * `reward_rate` — a snapshot of [`RewardConfig::reward_rate`] taken the
-//!   moment `stake` is called (first stake, or any top-up). If rewards were
+//!   moment a position is *first opened* by `stake`. If rewards were
 //!   instead computed from the *live* `RewardConfig` at claim time, an
 //!   admin's `set_reward_rate` call would silently change the accrual rate
 //!   for every already-open position — exactly what the acceptance
-//!   criterion says must not happen. Snapshotting on the position makes
-//!   each stake immune to later rate changes; only a fresh `stake` call
-//!   picks up the new rate.
+//!   criterion says must not happen. A top-up on an existing position does
+//!   **not** re-snapshot this rate either (see `stake`'s doc comment) —
+//!   only a brand-new position picks up the current config rate.
 //! * `pending_rewards` — rewards accrued but not yet paid out. Whenever a
-//!   position's `amount` or `reward_rate` is about to change (a top-up
-//!   stake, or a partial `unstake`), the reward owed for the *elapsed time
-//!   under the old amount/rate* is settled into this bucket first (see
+//!   position's `amount` is about to change (a top-up stake, or a partial
+//!   `unstake`), the reward owed for the *elapsed time under the old
+//!   amount/rate* is settled into this bucket first (see
 //!   [`settle_accrual`]), so past accrual is never lost, recomputed at a
 //!   new rate, or double-counted.
+//!
+//! `RewardConfig::reward_asset` is immutable once set for a given `asset`
+//! (see `set_reward_config`) — this guarantees `claim_rewards` always pays
+//! out in the same token stakers expected when they opened their position.
 //!
 //! Every other field matches the original `StakingPosition`/`RewardConfig`
 //! shape. All contract entrypoints return `Result<_, Error>` rather than
@@ -35,7 +39,9 @@
 //! `counter` reference contract) rather than the bare-return signatures
 //! originally sketched for this issue.
 
-use afri_contract_shared::extend_instance_ttl;
+use afri_contract_shared::{
+    extend_instance_ttl, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
+};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, token::TokenClient,
     Address, Env, MuxedAddress,
@@ -66,6 +72,11 @@ pub enum Error {
     PositionNotFound = 9,
     /// A checked arithmetic operation would have overflowed.
     Overflow = 10,
+    /// `set_reward_config` attempted to change `reward_asset` for an asset
+    /// that already has a `RewardConfig`. Once set, `reward_asset` cannot
+    /// change, so `claim_rewards` always pays out in the token stakers
+    /// expected when they staked.
+    RewardAssetImmutable = 11,
 }
 
 /// A staker's position in a given `asset`.
@@ -78,8 +89,9 @@ pub struct StakingPosition {
     pub staked_at: u64,
     pub lock_until: u64,
     pub rewards_claimed: i128,
-    /// Reward rate snapshot taken at the most recent `stake` call. See the
-    /// module-level docs for why this exists.
+    /// Reward rate snapshot taken when this position was first opened. See
+    /// the module-level docs for why this exists and why top-ups never
+    /// change it.
     pub reward_rate: i128,
     /// Rewards accrued but not yet paid out via `claim_rewards`. See the
     /// module-level docs for why this exists.
@@ -111,7 +123,7 @@ enum DataKey {
 }
 
 /// Emitted when `stake` is called (initial stake or top-up).
-#[contractevent(topics = ["staking", "stake"])]
+#[contractevent(topics = ["staking", "stake"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Staked {
     #[topic]
@@ -123,7 +135,7 @@ pub struct Staked {
 }
 
 /// Emitted when `unstake` returns principal to the staker.
-#[contractevent(topics = ["staking", "unstake"])]
+#[contractevent(topics = ["staking", "unstake"], data_format = "single-value")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Unstaked {
     #[topic]
@@ -134,7 +146,7 @@ pub struct Unstaked {
 }
 
 /// Emitted when `claim_rewards` pays out accrued rewards.
-#[contractevent(topics = ["staking", "claim"])]
+#[contractevent(topics = ["staking", "claim"], data_format = "single-value")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RewardsClaimed {
     #[topic]
@@ -144,10 +156,22 @@ pub struct RewardsClaimed {
     pub amount: i128,
 }
 
-/// Emitted when the admin sets or updates a `RewardConfig`'s rate — either
-/// via `set_reward_config` (new config) or `set_reward_rate` (rate-only
-/// update on an existing config).
-#[contractevent(topics = ["staking", "rate_set"])]
+/// Emitted when `set_reward_config` creates or updates a `RewardConfig`,
+/// carrying every field so indexers can observe reward-token and
+/// lock-policy changes, not just rate changes.
+#[contractevent(topics = ["staking", "cfg_set"], data_format = "vec")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RewardConfigSet {
+    #[topic]
+    pub asset: Address,
+    pub reward_asset: Address,
+    pub rate: i128,
+    pub min_stake_duration: u64,
+}
+
+/// Emitted when `set_reward_rate` updates just the rate of an existing
+/// `RewardConfig`.
+#[contractevent(topics = ["staking", "rate_set"], data_format = "single-value")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RewardRateSet {
     #[topic]
@@ -180,6 +204,18 @@ fn read_reward_config(env: &Env, asset: &Address) -> Result<RewardConfig, Error>
         .ok_or(Error::RewardConfigNotSet)
 }
 
+/// Extend the TTL of a persistent storage entry (a `StakingPosition` or
+/// `RewardConfig`), using the same bump amounts as `extend_instance_ttl`.
+/// Persistent entries have their own TTL independent of instance storage —
+/// without this, a long-idle position or reward config could expire even
+/// while the contract's instance data stays alive, breaking a later claim
+/// or unstake.
+fn extend_persistent_ttl(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
 /// `rate * amount * elapsed_secs`, using checked arithmetic throughout so a
 /// pathological rate/amount/duration combination fails loudly with
 /// `Error::Overflow` instead of silently wrapping.
@@ -192,8 +228,8 @@ fn compute_accrual(rate: i128, amount: i128, elapsed_secs: u64) -> Result<i128, 
 
 /// Settle rewards accrued since `pos.staked_at` (at the position's current
 /// `amount`/`reward_rate`) into `pos.pending_rewards`, then reset
-/// `pos.staked_at` to now. Must be called before `amount` or `reward_rate`
-/// changes, so no accrual window is computed at the wrong rate.
+/// `pos.staked_at` to now. Must be called before `amount` changes, so no
+/// accrual window is computed against the wrong amount.
 fn settle_accrual(env: &Env, pos: &mut StakingPosition) -> Result<(), Error> {
     let now = env.ledger().timestamp();
     let elapsed = now.saturating_sub(pos.staked_at);
@@ -228,20 +264,30 @@ pub struct StakingContract;
 
 #[contractimpl]
 impl StakingContract {
-    /// Initialize the contract, recording `admin`. Fails with
+    /// Initialize the contract, recording `admin`. Requires `admin`'s
+    /// authorization, so an attacker cannot front-run initialization and
+    /// claim the admin role for themselves. Fails with
     /// `Error::AlreadyInitialized` if called twice.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         extend_instance_ttl(&env);
         Ok(())
     }
 
-    /// Admin-only. Create or fully replace the `RewardConfig` for `asset`.
-    /// Required before `stake` will accept that asset. Rejects a negative
+    /// Admin-only. Create a `RewardConfig` for `asset`, or update the
+    /// `reward_rate`/`min_stake_duration` of an existing one. Required
+    /// before `stake` will accept that asset. Rejects a negative
     /// `reward_rate` with `Error::InvalidAmount`.
+    ///
+    /// `reward_asset` is immutable once set: if a config already exists
+    /// for `asset` and this call would change `reward_asset`, it fails
+    /// with `Error::RewardAssetImmutable`. Without this guard, an admin
+    /// could redirect payouts to a different token after stakers had
+    /// already accrued rewards in the original one.
     pub fn set_reward_config(
         env: Env,
         admin: Address,
@@ -254,20 +300,31 @@ impl StakingContract {
         if reward_rate < 0 {
             return Err(Error::InvalidAmount);
         }
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, RewardConfig>(&DataKey::RewardConfig(asset.clone()))
+        {
+            if existing.reward_asset != reward_asset {
+                return Err(Error::RewardAssetImmutable);
+            }
+        }
         let config = RewardConfig {
             asset: asset.clone(),
-            reward_asset,
+            reward_asset: reward_asset.clone(),
             reward_rate,
             min_stake_duration,
         };
         env.storage()
             .persistent()
             .set(&DataKey::RewardConfig(asset.clone()), &config);
-        extend_instance_ttl(&env);
+        extend_persistent_ttl(&env, &DataKey::RewardConfig(asset.clone()));
 
-        RewardRateSet {
+        RewardConfigSet {
             asset,
+            reward_asset,
             rate: reward_rate,
+            min_stake_duration,
         }
         .publish(&env);
         Ok(())
@@ -276,9 +333,9 @@ impl StakingContract {
     /// Admin-only. Update just the `reward_rate` of an existing
     /// `RewardConfig`. Per the acceptance criteria, this affects only
     /// *future* `stake` calls — every currently-open `StakingPosition`
-    /// keeps accruing at the rate it snapshotted when it was last staked
-    /// into. Fails with `Error::RewardConfigNotSet` if `asset` has no
-    /// config yet (use `set_reward_config` first).
+    /// keeps accruing at the rate it snapshotted when it was first opened.
+    /// Fails with `Error::RewardConfigNotSet` if `asset` has no config yet
+    /// (use `set_reward_config` first).
     pub fn set_reward_rate(
         env: Env,
         admin: Address,
@@ -294,7 +351,7 @@ impl StakingContract {
         env.storage()
             .persistent()
             .set(&DataKey::RewardConfig(asset.clone()), &config);
-        extend_instance_ttl(&env);
+        extend_persistent_ttl(&env, &DataKey::RewardConfig(asset.clone()));
 
         RewardRateSet { asset, rate }.publish(&env);
         Ok(())
@@ -316,10 +373,15 @@ impl StakingContract {
     ///
     /// If the staker already has an open position in this asset, this is a
     /// top-up: prior accrual is settled at the *old* amount/rate first (see
-    /// [`settle_accrual`]), the new amount is added, the position's
-    /// `reward_rate` is re-snapshotted to the current config rate, and
-    /// `lock_until` is extended to `max(existing lock_until, now +
-    /// lock_duration)` — a top-up can extend the lock but never shorten it.
+    /// [`settle_accrual`]), the new amount is added, and `lock_until` is
+    /// extended to `max(existing lock_until, now + lock_duration)` — a
+    /// top-up can extend the lock but never shorten it. Critically, the
+    /// position's `reward_rate` is **not** touched on a top-up: it keeps
+    /// accruing at whatever rate it snapshotted when first opened, so an
+    /// admin's `set_reward_rate` call between the original stake and a
+    /// top-up cannot retroactively reprice the already-staked principal.
+    /// Only a brand-new position (no prior stake) snapshots the current
+    /// config rate.
     ///
     /// Transfers `amount` of `asset` from `staker` to the contract.
     pub fn stake(
@@ -344,7 +406,8 @@ impl StakingContract {
             Some(mut existing) => {
                 settle_accrual(&env, &mut existing)?;
                 existing.amount = existing.amount.checked_add(amount).ok_or(Error::Overflow)?;
-                existing.reward_rate = config.reward_rate;
+                // Deliberately do NOT re-snapshot `reward_rate` here. See
+                // the doc comment above and the module-level docs.
                 existing.lock_until = if existing.lock_until > new_lock_until {
                     existing.lock_until
                 } else {
@@ -372,6 +435,10 @@ impl StakingContract {
 
         let lock_until = pos.lock_until;
         put_position(&env, &pos);
+        extend_persistent_ttl(
+            &env,
+            &DataKey::Position(pos.staker.clone(), pos.asset.clone()),
+        );
         extend_instance_ttl(&env);
 
         Staked {
@@ -409,6 +476,10 @@ impl StakingContract {
         settle_accrual(&env, &mut pos)?;
         pos.amount = pos.amount.checked_sub(amount).ok_or(Error::Overflow)?;
         put_position(&env, &pos);
+        extend_persistent_ttl(
+            &env,
+            &DataKey::Position(pos.staker.clone(), pos.asset.clone()),
+        );
         extend_instance_ttl(&env);
 
         TokenClient::new(&env, &asset).transfer(
@@ -451,6 +522,10 @@ impl StakingContract {
                 .ok_or(Error::Overflow)?;
             pos.pending_rewards = 0;
             put_position(&env, &pos);
+            extend_persistent_ttl(
+                &env,
+                &DataKey::Position(pos.staker.clone(), pos.asset.clone()),
+            );
             extend_instance_ttl(&env);
 
             RewardsClaimed {
