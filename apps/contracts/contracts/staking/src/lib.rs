@@ -456,12 +456,6 @@ impl StakingContract {
             },
         };
 
-        TokenClient::new(&env, &asset).transfer(
-            &staker,
-            MuxedAddress::from(env.current_contract_address()),
-            &amount,
-        );
-
         let lock_until = pos.lock_until;
         put_position(&env, &pos);
         extend_persistent_ttl(
@@ -469,6 +463,12 @@ impl StakingContract {
             &DataKey::Position(pos.staker.clone(), pos.asset.clone()),
         );
         extend_instance_ttl(&env);
+
+        TokenClient::new(&env, &asset).transfer(
+            &staker,
+            MuxedAddress::from(env.current_contract_address()),
+            &amount,
+        );
 
         Staked {
             staker,
@@ -479,7 +479,6 @@ impl StakingContract {
         .publish(&env);
         Ok(())
     }
-
     /// Withdraw `amount` of staked principal back to `staker`.
     ///
     /// Requires `staker.require_auth()`, an existing position
