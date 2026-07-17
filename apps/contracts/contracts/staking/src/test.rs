@@ -514,7 +514,10 @@ fn unstake_settles_pending_rewards_before_reducing_amount() {
 
     assert_eq!(reward_token.balance(&staker), 2000);
 
-    let _pos = client.get_position(&staker, &asset);
+    let pos = client.get_position(&staker, &asset);
+    assert_eq!(pos.amount, 50);
+    assert_eq!(pos.pending_rewards, 0);
+    assert_eq!(pos.rewards_claimed, 2000);
 }
 
 #[test]
@@ -570,29 +573,33 @@ fn stake_topup_settles_prior_accrual_into_pending_rewards() {
     let pos = client.get_position(&staker, &asset);
     assert_eq!(pos.pending_rewards, 2000);
     assert_eq!(pos.amount, 150);
+    // The accrual baseline (staked_at) must have advanced when settled —
+    // otherwise this elapsed window would be double-charged against the
+    // new, larger amount.
+    assert_eq!(client.calculate_rewards(&staker, &asset), 2000);
 }
 
-/// Top-up must NOT reprice already-staked principal to whatever the
-/// current config rate is — the position keeps its original snapshot
-/// rate even across a top-up.
+/// A top-up after a rate change must neither fully reprice existing
+/// principal to the new rate, nor let new principal ride the old rate
+/// indefinitely. The position's rate becomes a weighted average of the
+/// old principal (at the old rate) and the newly added principal (at the
+/// current config rate).
 #[test]
-fn stake_topup_after_rate_change_keeps_original_rate() {
+fn stake_topup_after_rate_change_uses_weighted_average_rate() {
     let (env, client, admin) = setup();
     let staker = Address::generate(&env);
     let (asset, _at, asset_mint) = create_token(&env, &admin);
     let (reward_asset, _rt, _ram) = create_token(&env, &admin);
     client.set_reward_config(&admin, &asset, &reward_asset, &2i128, &0u64);
     asset_mint.mint(&staker, &1_000i128);
-
     client.stake(&staker, &asset, &100i128, &0u64);
     client.set_reward_rate(&admin, &asset, &50i128);
     client.stake(&staker, &asset, &50i128, &0u64);
-
     let pos = client.get_position(&staker, &asset);
-    assert_eq!(pos.reward_rate, 2);
+    // (100 * 2 + 50 * 50) / 150 = (200 + 2500) / 150 = 18 (integer division)
+    assert_eq!(pos.reward_rate, 18);
     assert_eq!(pos.amount, 150);
 }
-
 /// The acceptance-criteria test: an admin's `set_reward_rate` call must
 /// only affect *future* stakes, never an already-open position.
 #[test]

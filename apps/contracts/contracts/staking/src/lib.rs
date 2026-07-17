@@ -319,6 +319,7 @@ impl StakingContract {
             .persistent()
             .set(&DataKey::RewardConfig(asset.clone()), &config);
         extend_persistent_ttl(&env, &DataKey::RewardConfig(asset.clone()));
+        extend_instance_ttl(&env);
 
         RewardConfigSet {
             asset,
@@ -352,6 +353,8 @@ impl StakingContract {
             .persistent()
             .set(&DataKey::RewardConfig(asset.clone()), &config);
         extend_persistent_ttl(&env, &DataKey::RewardConfig(asset.clone()));
+        extend_instance_ttl(&env);
+        extend_instance_ttl(&env);
 
         RewardRateSet { asset, rate }.publish(&env);
         Ok(())
@@ -405,9 +408,35 @@ impl StakingContract {
         let pos = match read_position(&env, &staker, &asset) {
             Some(mut existing) => {
                 settle_accrual(&env, &mut existing)?;
-                existing.amount = existing.amount.checked_add(amount).ok_or(Error::Overflow)?;
-                // Deliberately do NOT re-snapshot `reward_rate` here. See
-                // the doc comment above and the module-level docs.
+                let old_amount = existing.amount;
+                let new_total = old_amount.checked_add(amount).ok_or(Error::Overflow)?;
+                // Weighted-average the reward rate across old and newly
+                // added principal. Neither re-snapshotting to the current
+                // rate (which would reprice already-staked principal) nor
+                // keeping the old rate untouched (which would let new
+                // principal ride a stale rate indefinitely) is correct on
+                // its own; a weighted average is the minimal fix that
+                // avoids both. If the position was fully unstaked before
+                // this top-up (old_amount == 0), it simply adopts the
+                // current config rate fresh.
+                existing.reward_rate = if old_amount == 0 {
+                    config.reward_rate
+                } else {
+                    let weighted_old = existing
+                        .reward_rate
+                        .checked_mul(old_amount)
+                        .ok_or(Error::Overflow)?;
+                    let weighted_new = config
+                        .reward_rate
+                        .checked_mul(amount)
+                        .ok_or(Error::Overflow)?;
+                    weighted_old
+                        .checked_add(weighted_new)
+                        .ok_or(Error::Overflow)?
+                        .checked_div(new_total)
+                        .ok_or(Error::Overflow)?
+                };
+                existing.amount = new_total;
                 existing.lock_until = if existing.lock_until > new_lock_until {
                     existing.lock_until
                 } else {
