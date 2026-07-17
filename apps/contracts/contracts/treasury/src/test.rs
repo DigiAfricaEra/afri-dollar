@@ -94,7 +94,7 @@ fn initialize_requires_admin_auth() {
 
 #[test]
 fn enable_clawback_sets_config() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
 
@@ -147,7 +147,7 @@ fn enable_clawback_requires_admin_auth_even_for_real_admin() {
 
 #[test]
 fn enable_clawback_emits_full_event_payload() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
 
@@ -167,7 +167,7 @@ fn enable_clawback_emits_full_event_payload() {
 
 #[test]
 fn enable_clawback_overwrites_existing_config() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority_a = Address::generate(&env);
     let authority_b = Address::generate(&env);
@@ -187,7 +187,7 @@ fn enable_clawback_overwrites_existing_config() {
 
 #[test]
 fn disable_clawback_sets_enabled_false() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
 
@@ -201,7 +201,7 @@ fn disable_clawback_sets_enabled_false() {
 
 #[test]
 fn disable_clawback_fails_without_config() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let result = client.try_disable_clawback(&asset);
     assert_eq!(result, Err(Ok(Error::ConfigNotFound)));
@@ -229,7 +229,7 @@ fn disable_clawback_requires_admin_auth() {
 
 #[test]
 fn disable_clawback_emits_event() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     client.enable_clawback(&asset, &authority, &true);
@@ -254,20 +254,19 @@ fn disable_clawback_emits_event() {
 
 #[test]
 fn execute_clawback_fails_without_config() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
     let asset = Address::generate(&env);
     let reason = String::from_str(&env, "sanctions match");
 
-    let result =
-        client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
+    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
     assert_eq!(result, Err(Ok(Error::ConfigNotFound)));
 }
 
 #[test]
 fn execute_clawback_fails_when_disabled() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
@@ -276,14 +275,13 @@ fn execute_clawback_fails_when_disabled() {
     client.enable_clawback(&asset, &authority, &true);
     client.disable_clawback(&asset);
 
-    let result =
-        client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
+    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
     assert_eq!(result, Err(Ok(Error::ClawbackDisabled)));
 }
 
 #[test]
 fn execute_clawback_fails_with_wrong_authority() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     let wrong_authority = Address::generate(&env);
@@ -292,13 +290,7 @@ fn execute_clawback_fails_with_wrong_authority() {
 
     client.enable_clawback(&asset, &authority, &true);
 
-    let result = client.try_execute_clawback(
-        &wrong_authority,
-        &from,
-        &asset,
-        &100i128,
-        &reason,
-    );
+    let result = client.try_execute_clawback(&wrong_authority, &from, &asset, &100i128, &reason);
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
@@ -317,50 +309,46 @@ fn execute_clawback_requires_authority_auth() {
 
     env.set_auths(&[]);
     let reason = String::from_str(&env, "freeze");
-    let result =
-        client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
+    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
     assert!(result.is_err());
 }
 
 #[test]
 fn execute_clawback_rejects_zero_amount() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
     let reason = String::from_str(&env, "invalid");
     client.enable_clawback(&asset, &authority, &false);
 
-    let result =
-        client.try_execute_clawback(&authority, &from, &asset, &0i128, &reason);
+    let result = client.try_execute_clawback(&authority, &from, &asset, &0i128, &reason);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
 
 #[test]
 fn execute_clawback_rejects_negative_amount() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
     let reason = String::from_str(&env, "negative");
     client.enable_clawback(&asset, &authority, &false);
 
-    let result =
-        client.try_execute_clawback(&authority, &from, &asset, &-50i128, &reason);
+    let result = client.try_execute_clawback(&authority, &from, &asset, &-50i128, &reason);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
 
 #[test]
 fn execute_clawback_rejects_empty_reason_when_required() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
     let reason = String::from_str(&env, "");
     client.enable_clawback(&asset, &authority, &true);
 
-    let result =
-        client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
+    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
     assert_eq!(result, Err(Ok(Error::InvalidReason)));
 }
 
@@ -463,8 +451,7 @@ fn execute_clawback_allows_empty_reason_when_not_required() {
     asset_mint.set_authorized(&from, &false);
 
     let empty_reason = String::from_str(&env, "");
-    let record =
-        client.execute_clawback(&authority, &from, &asset, &50i128, &empty_reason);
+    let record = client.execute_clawback(&authority, &from, &asset, &50i128, &empty_reason);
     assert_eq!(record.amount, 50);
 }
 
@@ -474,7 +461,7 @@ fn execute_clawback_allows_empty_reason_when_not_required() {
 
 #[test]
 fn get_clawback_config_returns_none_when_not_set() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
 
     let config = client.get_clawback_config(&asset);
@@ -483,7 +470,7 @@ fn get_clawback_config_returns_none_when_not_set() {
 
 #[test]
 fn get_clawback_config_returns_correct_config_after_disable() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     client.enable_clawback(&asset, &authority, &true);
