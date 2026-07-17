@@ -1,3 +1,4 @@
+import type { Server } from 'http';
 import path from 'path';
 
 import cors from 'cors';
@@ -30,6 +31,7 @@ config({ path: path.resolve(__dirname, '../.env') });
 const app = express();
 app.set('trust proxy', true);
 const PORT = process.env.PORT || 3001;
+let httpServer: Server | null = null;
 
 // Export prisma for easy access
 export { prisma };
@@ -101,7 +103,7 @@ async function startServer(): Promise<void> {
 
     await jobQueueService.start();
 
-    app.listen(PORT, () => {
+    httpServer = app.listen(PORT, () => {
       console.log(`🚀 AfriDollar Backend API running on port ${PORT}`);
     });
   } catch (error) {
@@ -114,19 +116,39 @@ if (require.main === module) {
   void startServer();
 }
 
+async function closeHttpServer(): Promise<void> {
+  if (httpServer === null) {
+    return;
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    httpServer?.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
+function shutdown(signal: 'SIGTERM' | 'SIGINT'): void {
+  console.log(`${signal} signal received: closing HTTP server`);
+  void closeHttpServer()
+    .then(() => jobQueueService.stop())
+    .then(() => prisma.$disconnect())
+    .catch((error) => {
+      console.error('Graceful shutdown failed:', error);
+    })
+    .finally(() => process.exit(0));
+}
+
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  void jobQueueService
-    .stop()
-    .then(() => prisma.$disconnect())
-    .then(() => process.exit(0));
+  shutdown('SIGTERM');
 });
 
 process.on('SIGINT', () => {
-  console.log('SIGINT signal received: closing HTTP server');
-  void jobQueueService
-    .stop()
-    .then(() => prisma.$disconnect())
-    .then(() => process.exit(0));
+  shutdown('SIGINT');
 });

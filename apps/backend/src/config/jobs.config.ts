@@ -22,8 +22,8 @@ export const jobs: JobDefinition[] = [
     schedule: '* * * * *',
     handler: 'processPendingPayments',
     priority: 'high',
-    retryAttempts: 5,
-    retryDelay: 30000,
+    retryAttempts: 2,
+    retryDelay: 15000,
   },
   {
     name: 'cleanup-old-logs',

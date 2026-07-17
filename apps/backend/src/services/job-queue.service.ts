@@ -1,5 +1,6 @@
+import { JobExecutionStatus as DbJobExecutionStatus } from '@afri-dollar/database';
 import Bull, { Job, JobOptions } from 'bull';
-import cron, { ScheduledTask } from 'node-cron';
+import { validate } from 'node-cron';
 
 import prisma from '../config/database';
 import { jobs as defaultJobs } from '../config/jobs.config';
@@ -8,7 +9,7 @@ import type { JobDefinition, JobExecution } from '../types/job.types';
 import { jobHandlers, type JobHandlerName } from './job-handlers';
 
 type JobQueuePayload = {
-  executionId: string;
+  executionId?: string;
   jobName: string;
   handler: string;
 };
@@ -25,11 +26,20 @@ type PersistedJobExecution = {
 type QueueStatus = 'disabled' | 'ready' | 'error';
 
 const JOB_QUEUE_NAME = 'scheduled-jobs';
+const JOB_QUEUE_CONCURRENCY = 5;
+const MEMORY_EXECUTION_LIMIT = 1000;
+const DEFAULT_EXECUTION_LIMIT = 100;
+const MAX_EXECUTION_LIMIT = 200;
 const PRIORITY_VALUES: Record<JobDefinition['priority'], number> = {
   high: 1,
   medium: 5,
   low: 10,
 };
+
+export interface ListJobExecutionsOptions {
+  limit?: number;
+  cursor?: string;
+}
 
 function isJobStatus(status: string): status is JobExecution['status'] {
   return ['pending', 'running', 'completed', 'failed'].includes(status);
@@ -78,7 +88,6 @@ export function buildJobOptions(definition: JobDefinition): JobOptions {
 export class JobQueueService {
   private readonly definitions: JobDefinition[];
   private queue: Bull.Queue<JobQueuePayload> | null = null;
-  private readonly scheduledTasks: ScheduledTask[] = [];
   private status: QueueStatus = 'disabled';
   private readonly memoryExecutions = new Map<string, JobExecution>();
 
@@ -87,14 +96,14 @@ export class JobQueueService {
   }
 
   async start(): Promise<void> {
-    if (this.queue || this.scheduledTasks.length > 0) {
+    if (this.queue) {
       return;
     }
 
     if (!process.env.REDIS_URL) {
       this.status = 'disabled';
       console.warn('Job queue disabled: REDIS_URL is not configured');
-      this.registerSchedules();
+      this.validateSchedules();
       return;
     }
 
@@ -109,20 +118,19 @@ export class JobQueueService {
       console.error('Job queue Redis error:', error);
     });
 
-    void this.queue.process(async (job: Job<JobQueuePayload>): Promise<void> => {
-      await this.runJob(job.data);
-    });
+    void this.queue.process(
+      JOB_QUEUE_CONCURRENCY,
+      async (job: Job<JobQueuePayload>): Promise<void> => {
+        await this.runJob(job.data);
+      }
+    );
+
+    await this.registerRepeatableSchedules();
 
     this.status = 'ready';
-    this.registerSchedules();
   }
 
   async stop(): Promise<void> {
-    for (const task of this.scheduledTasks) {
-      task.stop();
-    }
-    this.scheduledTasks.length = 0;
-
     if (this.queue) {
       await this.queue.close();
       this.queue = null;
@@ -139,17 +147,28 @@ export class JobQueueService {
     return this.status;
   }
 
-  async listExecutions(): Promise<JobExecution[]> {
+  async listExecutions(options: ListJobExecutionsOptions = {}): Promise<JobExecution[]> {
+    const limit = Math.min(
+      Math.max(options.limit ?? DEFAULT_EXECUTION_LIMIT, 1),
+      MAX_EXECUTION_LIMIT
+    );
+
     try {
       const executions = await prisma.jobExecution.findMany({
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        take: 100,
+        take: limit,
+        ...(options.cursor ? { cursor: { id: options.cursor }, skip: 1 } : {}),
       });
 
       return executions.map(mapExecution);
     } catch (error) {
       console.error('Unable to read persisted job executions:', error);
-      return Array.from(this.memoryExecutions.values());
+      const executions = Array.from(this.memoryExecutions.values()).reverse();
+      const startIndex = options.cursor
+        ? executions.findIndex((execution) => execution.id === options.cursor) + 1
+        : 0;
+
+      return executions.slice(Math.max(startIndex, 0), Math.max(startIndex, 0) + limit);
     }
   }
 
@@ -175,9 +194,13 @@ export class JobQueueService {
     };
 
     if (!this.queue) {
-      await this.runJob(payload);
+      try {
+        await this.runJob(payload);
+      } catch (error) {
+        console.error(`Local execution failed for job ${definition.name}:`, error);
+      }
       const completedExecution = await this.getExecution(execution.id);
-      return completedExecution || execution;
+      return completedExecution ?? execution;
     }
 
     try {
@@ -196,37 +219,73 @@ export class JobQueueService {
     }
   }
 
-  private registerSchedules(): void {
+  private validateSchedules(): void {
     for (const definition of this.definitions) {
-      if (!cron.validate(definition.schedule)) {
+      if (!validate(definition.schedule)) {
+        console.error(`Invalid cron schedule for job ${definition.name}: ${definition.schedule}`);
+      }
+    }
+  }
+
+  private async registerRepeatableSchedules(): Promise<void> {
+    if (!this.queue) {
+      return;
+    }
+
+    for (const definition of this.definitions) {
+      if (!validate(definition.schedule)) {
         console.error(`Invalid cron schedule for job ${definition.name}: ${definition.schedule}`);
         continue;
       }
 
-      const task = cron.schedule(definition.schedule, () => {
-        void this.enqueueJob(definition);
-      });
-
-      this.scheduledTasks.push(task);
+      await this.queue.add(
+        definition.name,
+        {
+          jobName: definition.name,
+          handler: definition.handler,
+        },
+        {
+          ...buildJobOptions(definition),
+          jobId: definition.name,
+          repeat: {
+            cron: definition.schedule,
+          },
+        }
+      );
     }
   }
 
-  private async runJob(payload: JobQueuePayload): Promise<void> {
-    await this.markExecutionRunning(payload.executionId);
+  private async runJob(payload: JobQueuePayload): Promise<JobExecution> {
+    const execution =
+      payload.executionId !== undefined
+        ? await this.getExecution(payload.executionId)
+        : await this.createExecution(payload.jobName);
+    const executionId = execution?.id ?? payload.executionId;
+
+    if (executionId === undefined) {
+      throw new Error(`Unable to create execution record for job ${payload.jobName}`);
+    }
+
+    await this.markExecutionRunning(executionId);
 
     const handler = getJobHandler(payload.handler);
     if (handler === null) {
       const message = `Job handler not found: ${payload.handler}`;
-      await this.markExecutionFailed(payload.executionId, message);
+      await this.markExecutionFailed(executionId, message);
       throw new Error(message);
     }
 
     try {
       await handler();
-      await this.markExecutionCompleted(payload.executionId);
+      await this.markExecutionCompleted(executionId);
+      const completedExecution = await this.getExecution(executionId);
+      if (completedExecution === null) {
+        throw new Error(`Job execution not found after completion: ${executionId}`);
+      }
+      return completedExecution;
     } catch (error) {
       const message = getErrorMessage(error);
-      await this.markExecutionFailed(payload.executionId, message);
+      await this.markExecutionFailed(executionId, message);
       throw error;
     }
   }
@@ -242,7 +301,7 @@ export class JobQueueService {
       const execution = await prisma.jobExecution.create({
         data: {
           jobName,
-          status: 'pending',
+          status: DbJobExecutionStatus.pending,
         },
       });
 
@@ -250,6 +309,7 @@ export class JobQueueService {
     } catch (error) {
       console.error('Unable to persist pending job execution:', error);
       this.memoryExecutions.set(fallback.id, fallback);
+      this.evictOldMemoryExecutions();
       return fallback;
     }
   }
@@ -302,10 +362,23 @@ export class JobQueueService {
     try {
       await prisma.jobExecution.update({
         where: { id },
-        data,
+        data: {
+          ...data,
+          status: data.status,
+        },
       });
     } catch (error) {
       console.error(`Unable to update job execution ${id}:`, error);
+    }
+  }
+
+  private evictOldMemoryExecutions(): void {
+    while (this.memoryExecutions.size > MEMORY_EXECUTION_LIMIT) {
+      const oldestKey = this.memoryExecutions.keys().next().value;
+      if (oldestKey === undefined) {
+        return;
+      }
+      this.memoryExecutions.delete(oldestKey);
     }
   }
 }

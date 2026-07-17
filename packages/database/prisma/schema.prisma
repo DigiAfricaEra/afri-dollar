@@ -17,6 +17,13 @@ enum UserRole {
   AUDITOR
 }
 
+enum JobExecutionStatus {
+  pending
+  running
+  completed
+  failed
+}
+
 // User model for authentication and authorization
 model User {
   id            String      @id @default(cuid())
@@ -255,14 +262,14 @@ model AuditLog {
 
 // Scheduled job execution log
 model JobExecution {
-  id          String    @id @default(cuid())
+  id          String             @id @default(cuid())
   jobName     String
-  status      String    @default("pending") // 'pending', 'running', 'completed', 'failed'
+  status      JobExecutionStatus @default(pending)
   startedAt   DateTime?
   completedAt DateTime?
   error       String?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
 
   @@index([jobName, createdAt])
   @@index([status])

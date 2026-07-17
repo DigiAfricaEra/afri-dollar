@@ -1,5 +1,15 @@
 import http from 'http';
 
+const mockListExecutions = jest.fn(async () => [
+  {
+    id: 'job-execution-1',
+    jobName: 'sync-fx-rates',
+    status: 'completed',
+    startedAt: new Date('2026-07-17T08:00:00.000Z'),
+    completedAt: new Date('2026-07-17T08:00:01.000Z'),
+  },
+]);
+
 jest.mock('../../middleware/auth.middleware', () => ({
   authMiddleware: (_req: http.IncomingMessage, _res: http.ServerResponse, next: () => void): void =>
     next(),
@@ -23,15 +33,7 @@ jest.mock('../../services/job-queue.service', () => ({
         retryDelay: 60000,
       },
     ]),
-    listExecutions: jest.fn(async () => [
-      {
-        id: 'job-execution-1',
-        jobName: 'sync-fx-rates',
-        status: 'completed',
-        startedAt: new Date('2026-07-17T08:00:00.000Z'),
-        completedAt: new Date('2026-07-17T08:00:01.000Z'),
-      },
-    ]),
+    listExecutions: mockListExecutions,
     getExecution: jest.fn(async (id: string) =>
       id === 'job-execution-1'
         ? {
@@ -85,7 +87,7 @@ describe('Job status routes', () => {
   });
 
   it('lists job definitions and current status', async () => {
-    const response = await fetch(`${baseUrl}/api/v1/jobs`);
+    const response = await fetch(`${baseUrl}/api/v1/jobs?limit=25&cursor=cursor-1`);
     const rawBody: unknown = await response.json();
     const body = rawBody as {
       success: boolean;
@@ -103,6 +105,10 @@ describe('Job status routes', () => {
     expect(body.data.executions).toEqual([
       expect.objectContaining({ id: 'job-execution-1', status: 'completed' }),
     ]);
+    expect(mockListExecutions).toHaveBeenCalledWith({
+      limit: 25,
+      cursor: 'cursor-1',
+    });
   });
 
   it('returns a single job execution detail', async () => {
