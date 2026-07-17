@@ -12,7 +12,6 @@
 //! * Bridge fee management
 
 use afri_contract_shared::{extend_instance_ttl, Error};
-use soroban_sdk::testutils::Address as TestAddress;
 use soroban_sdk::{
     contract, contractevent, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Symbol,
 };
@@ -217,7 +216,7 @@ impl BridgeContract {
         let fee_amount = (amount * bridge_fee as i128) / 10000;
         let net_amount = amount - fee_amount;
 
-        let sender = <soroban_sdk::Address as TestAddress>::generate(&env);
+        let sender = env.current_contract_address();
 
         let request = BridgeRequest {
             id: next_id,
@@ -334,7 +333,7 @@ impl BridgeContract {
             .get(&DataKey::NextRequestId)
             .unwrap_or(1);
 
-        let sender = <soroban_sdk::Address as TestAddress>::generate(&env);
+        let sender = env.current_contract_address();
 
         let request = BridgeRequest {
             id: next_id,
