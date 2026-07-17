@@ -145,8 +145,12 @@ impl EscrowContract {
             released_at: None,
         };
 
-        env.storage().instance().set(&DataKey::Escrow(next_id), &escrow);
-        env.storage().instance().set(&DataKey::NextEscrowId, &(next_id + 1));
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(next_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextEscrowId, &(next_id + 1));
         extend_instance_ttl(&env);
 
         EscrowCreated {
@@ -184,7 +188,9 @@ impl EscrowContract {
 
         funder.require_auth();
         escrow.status = EscrowStatus::Funded;
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         extend_instance_ttl(&env);
 
         EscrowFunded {
@@ -214,7 +220,9 @@ impl EscrowContract {
         if escrow.status == EscrowStatus::Funded && now >= escrow.timeout_at {
             escrow.status = EscrowStatus::Completed;
             escrow.released_at = Some(now);
-            env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+            env.storage()
+                .instance()
+                .set(&DataKey::Escrow(escrow_id), &escrow);
             extend_instance_ttl(&env);
             EscrowReleased {
                 escrow_id,
@@ -235,7 +243,9 @@ impl EscrowContract {
         releaser.require_auth();
         escrow.status = EscrowStatus::Completed;
         escrow.released_at = Some(now);
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         extend_instance_ttl(&env);
 
         EscrowReleased {
@@ -264,7 +274,9 @@ impl EscrowContract {
 
         arbitrator.require_auth();
         escrow.status = EscrowStatus::Refunded;
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         extend_instance_ttl(&env);
 
         EscrowRefunded {
@@ -293,19 +305,22 @@ impl EscrowContract {
 
         party.require_auth();
         escrow.status = EscrowStatus::Disputed;
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         extend_instance_ttl(&env);
 
-        EscrowDisputed {
-            escrow_id,
-            party,
-        }
-        .publish(&env);
+        EscrowDisputed { escrow_id, party }.publish(&env);
 
         Ok(())
     }
 
-    pub fn resolve_dispute(env: Env, escrow_id: u64, arbitrator: Address, winner: Address) -> Result<(), Error> {
+    pub fn resolve_dispute(
+        env: Env,
+        escrow_id: u64,
+        arbitrator: Address,
+        winner: Address,
+    ) -> Result<(), Error> {
         let mut escrow: Escrow = env
             .storage()
             .instance()
@@ -331,14 +346,12 @@ impl EscrowContract {
             EscrowStatus::Refunded
         };
         escrow.released_at = Some(env.ledger().timestamp());
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         extend_instance_ttl(&env);
 
-        EscrowResolved {
-            escrow_id,
-            winner,
-        }
-        .publish(&env);
+        EscrowResolved { escrow_id, winner }.publish(&env);
 
         Ok(())
     }
@@ -360,7 +373,9 @@ impl EscrowContract {
 
         caller.require_auth();
         escrow.status = EscrowStatus::Cancelled;
-        env.storage().instance().set(&DataKey::Escrow(escrow_id), &escrow);
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(escrow_id), &escrow);
         extend_instance_ttl(&env);
 
         EscrowCancelled { escrow_id }.publish(&env);
