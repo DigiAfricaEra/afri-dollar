@@ -14,8 +14,7 @@ use afri_contract_shared::{
     extend_instance_ttl, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
 };
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype,
-    token::StellarAssetClient,
+    contract, contracterror, contractevent, contractimpl, contracttype, token::StellarAssetClient,
     Address, Env, String, Vec,
 };
 
@@ -280,7 +279,9 @@ impl TreasuryContract {
         extend_persistent_ttl(&env, &DataKey::ClawbackRecord(record_id));
 
         let next_id = record_id.checked_add(1).ok_or(Error::Overflow)?;
-        env.storage().instance().set(&DataKey::NextRecordId, &next_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextRecordId, &next_id);
         extend_instance_ttl(&env);
 
         ClawbackExecuted {
