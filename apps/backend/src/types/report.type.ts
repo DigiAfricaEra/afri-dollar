@@ -10,9 +10,7 @@ export type ReportStatus = 'pending' | 'generating' | 'completed' | 'failed';
 
 export type ReportFormat = 'csv' | 'pdf' | 'xlsx';
 
-export type ReportDataValue = string | number | boolean | null | undefined;
-
-export type ReportData = Record<string, ReportDataValue>;
+export type ReportData = Record<string, unknown>;
 
 export interface ReportRequest {
   id: string;
@@ -36,8 +34,8 @@ export interface ReportTemplate {
 }
 
 export interface ReportParameters {
-  startDate?: Date;
-  endDate?: Date;
+  startDate?: string;
+  endDate?: string;
   userId?: string;
   assetCode?: string;
   status?: string;
