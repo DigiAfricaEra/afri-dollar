@@ -177,8 +177,8 @@ fn enable_clawback_overwrites_existing_config() {
 
     let config = client.get_clawback_config(&asset).unwrap();
     assert_eq!(config.authority, authority_b);
-    assert_eq!(config.reason_required, false);
-    assert_eq!(config.enabled, true);
+    assert!(!config.reason_required);
+    assert!(config.enabled);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ fn disable_clawback_sets_enabled_false() {
     client.disable_clawback(&asset);
 
     let config = client.get_clawback_config(&asset).unwrap();
-    assert_eq!(config.enabled, false);
+    assert!(!config.enabled);
     assert_eq!(config.authority, authority);
 }
 
@@ -477,9 +477,9 @@ fn get_clawback_config_returns_correct_config_after_disable() {
     client.disable_clawback(&asset);
 
     let config = client.get_clawback_config(&asset).unwrap();
-    assert_eq!(config.enabled, false);
+    assert!(!config.enabled);
     assert_eq!(config.authority, authority);
-    assert_eq!(config.reason_required, true);
+    assert!(config.reason_required);
 }
 
 // ---------------------------------------------------------------------------

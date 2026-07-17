@@ -246,7 +246,7 @@ impl TreasuryContract {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        if config.reason_required && reason.len() == 0 {
+        if config.reason_required && reason.is_empty() {
             return Err(Error::InvalidReason);
         }
 
@@ -313,7 +313,7 @@ impl TreasuryContract {
             .get(&DataKey::NextRecordId)
             .unwrap_or(1);
 
-        let max_records = if limit <= 0 { 0 } else { limit };
+        let max_records = if limit == 0 { 0 } else { limit };
         let count = (next_id - 1).min(max_records as u64);
         let mut records: Vec<ClawbackRecord> = Vec::new(&env);
 
