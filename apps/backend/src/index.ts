@@ -11,7 +11,6 @@ import helmet from 'helmet';
 interface MountableRouter {
   (req: express.Request, res: express.Response, next: express.NextFunction): void;
 }
-
 import prisma from './config/database';
 import { errorMiddleware } from './middleware/error.middleware';
 import auditRouter from './routes/audit.routes';
@@ -20,6 +19,7 @@ import fxRouter, { adminFxRouter } from './routes/fx.routes';
 import jobRouter from './routes/job.routes';
 import paymentRouter from './routes/payment.routes';
 import payrollRouter from './routes/payroll.routes';
+import reportRouter from './routes/report.routes';
 import securityRouter from './routes/security.routes';
 import stellarRouter from './routes/stellar.routes';
 import treasuryRouter from './routes/treasury.routes';
@@ -90,6 +90,9 @@ app.use('/api/v1/wallet', walletRouter as MountableRouter);
 
 // Job routes (admin only)
 app.use('/api/v1/jobs', jobRouter as MountableRouter);
+
+// Report routes
+app.use('/api/v1/reports', reportRouter as MountableRouter);
 
 // Global error handler
 app.use(errorMiddleware);
