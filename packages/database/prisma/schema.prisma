@@ -310,3 +310,30 @@ model PayrollItem {
   @@index([payrollBatchId])
   @@index([status])
 }
+
+// Report generation and scheduling
+model ReportRequest {
+  id              String        @id @default(cuid())
+  userId          String
+  reportType      String
+  format          String
+  parameters      Json?
+  status          String        @default("pending")
+  downloadUrl     String?
+  createdAt       DateTime      @default(now())
+  completedAt     DateTime?
+
+  @@index([userId])
+}
+
+model ReportTemplate {
+  id              String        @id @default(cuid())
+  name            String
+  reportType      String
+  query           String?
+  config          Json?
+  format          String
+  schedule        String?
+
+  @@index([reportType])
+}
