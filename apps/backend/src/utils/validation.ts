@@ -67,3 +67,28 @@ export const createCrossBorderPaymentSchema = z.object({
 export const paymentIdParamSchema = z.object({
   id: z.string().min(1, 'Payment ID is required'),
 });
+
+export const generateReportSchema = z.object({
+  reportType: z.enum([
+    'transaction-history',
+    'compliance-report',
+    'financial-statment',
+    'payroll-report',
+    'treasury-report',
+    'audit-log',
+  ]),
+  format: z.enum(['csv', 'pdf', 'xlsx']),
+  parameters: z
+    .object({
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      userId: z.string().optional(),
+      assetCode: z.string().optional(),
+      status: z.string().optional(),
+    })
+    .optional(),
+});
+
+export const reportIdParamSchema = z.object({
+  id: z.string().min(1, 'Report ID is required'),
+});
