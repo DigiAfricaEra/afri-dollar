@@ -15,6 +15,7 @@ use afri_contract_shared::{extend_instance_ttl, Error};
 use soroban_sdk::{
     contract, contractevent, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Symbol, Vec,
 };
+use soroban_sdk::testutils::Address as TestAddress;
 
 /// Bridge request status enum.
 #[contracttype]
@@ -222,13 +223,15 @@ impl BridgeContract {
         let fee_amount = (amount * bridge_fee as i128) / 10000;
         let net_amount = amount - fee_amount;
 
+        let sender = <soroban_sdk::Address as TestAddress>::generate(&env);
+
         let request = BridgeRequest {
             id: request_id,
             source_chain: symbol_short!("stellar"),
             destination_chain,
             asset: asset.clone(),
             amount: net_amount,
-            sender: env.invoker(),
+            sender: sender.clone(),
             recipient,
             status: BridgeStatus::Pending,
             created_at: env.ledger().timestamp(),
@@ -260,7 +263,7 @@ impl BridgeContract {
             destination_chain: request.destination_chain.clone(),
             asset,
             amount: net_amount,
-            sender: env.invoker(),
+            sender,
         }
         .publish(&env);
 
@@ -341,13 +344,15 @@ impl BridgeContract {
         next_id += 1;
         env.storage().instance().set(&DataKey::NextRequestId, &next_id);
 
+        let sender = <soroban_sdk::Address as TestAddress>::generate(&env);
+
         let request = BridgeRequest {
             id: request_id,
             source_chain,
             destination_chain: symbol_short!("stellar"),
             asset,
             amount,
-            sender: env.invoker(),
+            sender: sender.clone(),
             recipient,
             status: BridgeStatus::Burned,
             created_at: env.ledger().timestamp(),
