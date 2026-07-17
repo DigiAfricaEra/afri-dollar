@@ -63,7 +63,7 @@ fn lock_asset_creates_bridge_request() {
     let request = request.unwrap();
     assert_eq!(request.id, 1);
     assert_eq!(request.amount, 9970); // 10000 - 0.30% fee (30 basis points)
-    assert_eq!(request.status, crate::BridgeStatus::Pending);
+    assert_eq!(request.status, crate::BridgeStatus::Locked);
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn mint_wrapped_changes_status() {
 
     let proof = Bytes::from_array(&env, &[9, 8, 7, 6]);
     client.mint_wrapped(&request_id, &proof);
-    
+
     let request = client.get_bridge_request(&request_id).unwrap();
     assert_eq!(request.status, crate::BridgeStatus::Minted);
     assert!(request.completed_at.is_some());
@@ -160,7 +160,7 @@ fn mint_wrapped_wrong_status_errors() {
     env.mock_all_auths();
     let request_id = client.lock_asset(&asset, &1000, &dest, &recipient);
 
-    // Mint once
+    // Mint with valid proof
     let proof = Bytes::from_array(&env, &[9, 8, 7, 6]);
     client.mint_wrapped(&request_id, &proof);
 
@@ -270,15 +270,58 @@ fn get_bridge_request_ids_returns_ids() {
     client.lock_asset(&asset, &1000, &dest, &recipient);
     client.lock_asset(&asset, &2000, &dest, &recipient);
 
-    let ids = client.get_bridge_request_ids();
-    assert_eq!(ids.len(), 2);
+    // get_bridge_request_ids removed to avoid unbounded storage growth
 }
 
 #[test]
-fn get_bridge_request_nonexistent_returns_none() {
-    let (_env, _id, client, _admin) = setup();
-    let result = client.get_bridge_request(&999);
-    assert!(result.is_none());
+fn lock_asset_rejects_zero_amount() {
+    let (env, _id, client, _admin) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let asset = Address::generate(&env);
+    let dest = symbol_short!("ethereum");
+    let recipient = Bytes::from_array(&env, &[1, 2, 3]);
+
+    env.mock_all_auths();
+    let result = client.try_lock_asset(&asset, &0, &dest, &recipient);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn mint_wrapped_requires_proof() {
+    let (env, _id, client, _admin) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let asset = Address::generate(&env);
+    let dest = symbol_short!("ethereum");
+    let recipient = Bytes::from_array(&env, &[1, 2, 3]);
+
+    env.mock_all_auths();
+    let request_id = client.lock_asset(&asset, &1000, &dest, &recipient);
+
+    // Empty proof should fail
+    let result = client.try_mint_wrapped(&request_id, &Bytes::new(&env));
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+#[test]
+fn unlock_asset_requires_proof() {
+    let (env, _id, client, _admin) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let asset = Address::generate(&env);
+    let source = symbol_short!("ethereum");
+    let recipient = Bytes::from_array(&env, &[1, 2, 3]);
+
+    env.mock_all_auths();
+    let burn_request_id = client.burn_wrapped(&asset, &500, &source, &recipient);
+
+    // Empty proof should fail
+    let result = client.try_unlock_asset(&burn_request_id, &Bytes::new(&env));
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]

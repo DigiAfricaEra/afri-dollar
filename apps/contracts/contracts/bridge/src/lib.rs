@@ -12,10 +12,10 @@
 //! * Bridge fee management
 
 use afri_contract_shared::{extend_instance_ttl, Error};
-use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Symbol, Vec,
-};
 use soroban_sdk::testutils::Address as TestAddress;
+use soroban_sdk::{
+    contract, contractevent, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Symbol,
+};
 
 /// Bridge request status enum.
 #[contracttype]
@@ -67,8 +67,6 @@ enum DataKey {
     BridgeFee,
     /// Individual bridge request by ID.
     BridgeRequest(u64),
-    /// Sequence of all bridge request IDs.
-    BridgeRequestIds,
 }
 
 /// Event published when a bridge request is initiated.
@@ -172,9 +170,6 @@ impl BridgeContract {
         env.storage().instance().set(&DataKey::NextRequestId, &1u64);
         env.storage().instance().set(&DataKey::BridgeFee, &30u32); // 0.30% default fee
 
-        // Initialize empty request ID list
-        env.storage().instance().set(&DataKey::BridgeRequestIds, &Vec::<u64>::new(&env));
-
         extend_instance_ttl(&env);
         Ok(())
     }
@@ -197,21 +192,21 @@ impl BridgeContract {
         destination_chain: Symbol,
         recipient: Bytes,
     ) -> Result<u64, Error> {
-        let admin: Address = env
+        if amount <= 0 {
+            return Err(Error::Unauthorized);
+        }
+
+        let _admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
 
-        let mut next_id: u64 = env
+        let next_id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextRequestId)
             .unwrap_or(1);
-
-        let request_id = next_id;
-        next_id += 1;
-        env.storage().instance().set(&DataKey::NextRequestId, &next_id);
 
         let bridge_fee: u32 = env
             .storage()
@@ -219,46 +214,37 @@ impl BridgeContract {
             .get(&DataKey::BridgeFee)
             .unwrap_or(30);
 
-        // Calculate fee (basis points)
         let fee_amount = (amount * bridge_fee as i128) / 10000;
         let net_amount = amount - fee_amount;
 
         let sender = <soroban_sdk::Address as TestAddress>::generate(&env);
 
         let request = BridgeRequest {
-            id: request_id,
+            id: next_id,
             source_chain: symbol_short!("stellar"),
             destination_chain,
             asset: asset.clone(),
             amount: net_amount,
             sender: sender.clone(),
             recipient,
-            status: BridgeStatus::Pending,
+            status: BridgeStatus::Locked,
             created_at: env.ledger().timestamp(),
             completed_at: None,
         };
 
-        // Store the request
         env.storage()
             .instance()
-            .set(&DataKey::BridgeRequest(request_id), &request);
+            .set(&DataKey::BridgeRequest(next_id), &request);
 
-        // Add to request IDs list
-        let mut request_ids: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::BridgeRequestIds)
-            .unwrap_or(Vec::new(&env));
-        request_ids.push_back(request_id);
         env.storage()
             .instance()
-            .set(&DataKey::BridgeRequestIds, &request_ids);
+            .set(&DataKey::NextRequestId, &(next_id + 1));
 
         extend_instance_ttl(&env);
 
         // Emit event
         BridgeInitiated {
-            request_id,
+            request_id: next_id,
             source_chain: symbol_short!("stellar"),
             destination_chain: request.destination_chain.clone(),
             asset,
@@ -267,7 +253,7 @@ impl BridgeContract {
         }
         .publish(&env);
 
-        Ok(request_id)
+        Ok(next_id)
     }
 
     /// Mint wrapped assets on the destination chain.
@@ -280,14 +266,18 @@ impl BridgeContract {
     /// # Returns
     /// * `Ok(())` on successful minting.
     /// * `Err(Error::NotInitialized)` if contract not initialized.
-    pub fn mint_wrapped(env: Env, bridge_request_id: u64, _proof: Bytes) -> Result<(), Error> {
+    pub fn mint_wrapped(env: Env, bridge_request_id: u64, proof: Bytes) -> Result<(), Error> {
         let mut request: BridgeRequest = env
             .storage()
             .instance()
             .get(&DataKey::BridgeRequest(bridge_request_id))
             .ok_or(Error::NotInitialized)?;
 
-        if request.status != BridgeStatus::Pending {
+        if request.status != BridgeStatus::Locked {
+            return Err(Error::Unauthorized);
+        }
+
+        if proof.is_empty() {
             return Err(Error::Unauthorized);
         }
 
@@ -328,26 +318,26 @@ impl BridgeContract {
         source_chain: Symbol,
         recipient: Bytes,
     ) -> Result<u64, Error> {
-        let admin: Address = env
+        if amount <= 0 {
+            return Err(Error::Unauthorized);
+        }
+
+        let _admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
 
-        let mut next_id: u64 = env
+        let next_id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextRequestId)
             .unwrap_or(1);
 
-        let request_id = next_id;
-        next_id += 1;
-        env.storage().instance().set(&DataKey::NextRequestId, &next_id);
-
         let sender = <soroban_sdk::Address as TestAddress>::generate(&env);
 
         let request = BridgeRequest {
-            id: request_id,
+            id: next_id,
             source_chain,
             destination_chain: symbol_short!("stellar"),
             asset,
@@ -361,29 +351,22 @@ impl BridgeContract {
 
         env.storage()
             .instance()
-            .set(&DataKey::BridgeRequest(request_id), &request);
+            .set(&DataKey::BridgeRequest(next_id), &request);
 
-        // Add to request IDs list
-        let mut request_ids: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::BridgeRequestIds)
-            .unwrap_or(Vec::new(&env));
-        request_ids.push_back(request_id);
         env.storage()
             .instance()
-            .set(&DataKey::BridgeRequestIds, &request_ids);
+            .set(&DataKey::NextRequestId, &(next_id + 1));
 
         extend_instance_ttl(&env);
 
         // Emit event
         WrappedBurned {
-            request_id,
+            request_id: next_id,
             amount,
         }
         .publish(&env);
 
-        Ok(request_id)
+        Ok(next_id)
     }
 
     /// Unlock original assets on the source chain after proof verification.
@@ -396,7 +379,7 @@ impl BridgeContract {
     /// # Returns
     /// * `Ok(())` on successful unlocking.
     /// * `Err(Error::NotInitialized)` if contract not initialized.
-    pub fn unlock_asset(env: Env, bridge_request_id: u64, _proof: Bytes) -> Result<(), Error> {
+    pub fn unlock_asset(env: Env, bridge_request_id: u64, proof: Bytes) -> Result<(), Error> {
         let mut request: BridgeRequest = env
             .storage()
             .instance()
@@ -404,6 +387,10 @@ impl BridgeContract {
             .ok_or(Error::NotInitialized)?;
 
         if request.status != BridgeStatus::Burned {
+            return Err(Error::Unauthorized);
+        }
+
+        if proof.is_empty() {
             return Err(Error::Unauthorized);
         }
 
@@ -466,20 +453,6 @@ impl BridgeContract {
         env.storage()
             .instance()
             .get(&DataKey::BridgeRequest(request_id))
-    }
-
-    /// Get all bridge request IDs.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    ///
-    /// # Returns
-    /// * `Vec<u64>` - List of all bridge request IDs.
-    pub fn get_bridge_request_ids(env: Env) -> Vec<u64> {
-        env.storage()
-            .instance()
-            .get(&DataKey::BridgeRequestIds)
-            .unwrap_or(Vec::new(&env))
     }
 
     /// Get the current bridge fee percentage.
