@@ -1,33 +1,41 @@
-type ReportType =
+export type ReportType =
   | 'transaction-history'
   | 'compliance-report'
-  | 'financial-statment'
+  | 'financial-statement'
   | 'payroll-report'
   | 'treasury-report'
   | 'audit-log';
 
-interface ReportRequest {
+export type ReportStatus = 'pending' | 'generating' | 'completed' | 'failed';
+
+export type ReportFormat = 'csv' | 'pdf' | 'xlsx';
+
+export type ReportDataValue = string | number | boolean | null | undefined;
+
+export type ReportData = Record<string, ReportDataValue>;
+
+export interface ReportRequest {
   id: string;
   userId: string;
-  reportType: string;
-  format: 'csv' | 'pdf' | 'xlsx';
-  parameters: Record<string, any>;
-  status: 'pending' | 'generating' | 'completed' | 'failed';
+  reportType: ReportType;
+  format: ReportFormat;
+  parameters: ReportParameters;
+  status: ReportStatus;
   createdAt: Date;
   completedAt?: Date;
   downloadUrl?: string;
 }
 
-interface ReportTemplate {
+export interface ReportTemplate {
   id: string;
   name: string;
-  reportType: string;
+  reportType: ReportType;
   query: string;
-  format: string;
+  format: ReportFormat;
   schedule?: string;
 }
 
-interface ReportParameters {
+export interface ReportParameters {
   startDate?: Date;
   endDate?: Date;
   userId?: string;
