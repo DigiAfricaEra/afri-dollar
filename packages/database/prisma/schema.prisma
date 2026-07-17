@@ -253,6 +253,21 @@ model AuditLog {
   @@index([userId, createdAt])
 }
 
+// Scheduled job execution log
+model JobExecution {
+  id          String    @id @default(cuid())
+  jobName     String
+  status      String    @default("pending") // 'pending', 'running', 'completed', 'failed'
+  startedAt   DateTime?
+  completedAt DateTime?
+  error       String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([jobName, createdAt])
+  @@index([status])
+}
+
 // Payroll batch for managing multiple payroll payouts
 model PayrollBatch {
   id          String   @id @default(cuid())
