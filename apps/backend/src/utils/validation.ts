@@ -72,7 +72,7 @@ export const generateReportSchema = z.object({
   reportType: z.enum([
     'transaction-history',
     'compliance-report',
-    'financial-statment',
+    'financial-statement',
     'payroll-report',
     'treasury-report',
     'audit-log',
