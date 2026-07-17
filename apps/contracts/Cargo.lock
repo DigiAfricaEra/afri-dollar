@@ -3,9 +3,25 @@
 version = 4
 
 [[package]]
+name = "afri-contract-bridge"
+version = "0.1.0"
+dependencies = [
+ "afri-contract-shared",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "afri-contract-shared"
 version = "0.1.0"
 dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
+name = "afri-contract-token"
+version = "0.1.0"
+dependencies = [
+ "afri-contract-shared",
  "soroban-sdk",
 ]
 
