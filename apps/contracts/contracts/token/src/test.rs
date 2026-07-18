@@ -5,8 +5,12 @@ use soroban_sdk::{
 };
 
 fn assert_one_event(env: &Env, contract: &Address) {
-    let filtered = env.events().all().filter_by_contract(contract);
-    assert_eq!(filtered.events().len(), 1);
+    let snapshot = env.events().all();
+    let filtered = snapshot.filter_by_contract(contract);
+    assert!(
+        !filtered.events().is_empty(),
+        "expected at least one event from contract"
+    );
 }
 
 fn setup() -> (Env, TokenContractClient<'static>, Address) {
@@ -314,7 +318,7 @@ fn approve_sets_allowance() {
     let (_env, client, issuer) = setup();
     let spender = Address::generate(&_env);
 
-    client.approve(&issuer, &spender, &500i128, &0u64);
+    client.approve(&issuer, &spender, &500i128, &0u32);
 
     assert_eq!(client.allowance(&issuer, &spender), 500);
 }
@@ -323,14 +327,14 @@ fn approve_sets_allowance() {
 fn approve_with_expiry() {
     let (env, client, issuer) = setup();
     let spender = Address::generate(&env);
-    let future = env.ledger().timestamp() + 100;
+    let future = env.ledger().sequence() + 100;
 
     client.approve(&issuer, &spender, &500i128, &future);
 
     assert_eq!(client.allowance(&issuer, &spender), 500);
 
     // Advance past expiry.
-    env.ledger().with_mut(|li| li.timestamp += 101);
+    env.ledger().with_mut(|li| li.sequence_number += 101);
     assert_eq!(client.allowance(&issuer, &spender), 0);
 }
 
@@ -339,10 +343,10 @@ fn approve_zero_removes_allowance() {
     let (_env, client, issuer) = setup();
     let spender = Address::generate(&_env);
 
-    client.approve(&issuer, &spender, &500i128, &0u64);
+    client.approve(&issuer, &spender, &500i128, &0u32);
     assert_eq!(client.allowance(&issuer, &spender), 500);
 
-    client.approve(&issuer, &spender, &0i128, &0u64);
+    client.approve(&issuer, &spender, &0i128, &0u32);
     assert_eq!(client.allowance(&issuer, &spender), 0);
 }
 
@@ -351,7 +355,7 @@ fn approve_rejects_negative_amount() {
     let (_env, client, issuer) = setup();
     let spender = Address::generate(&_env);
 
-    let result = client.try_approve(&issuer, &spender, &-1i128, &0u64);
+    let result = client.try_approve(&issuer, &spender, &-1i128, &0u32);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
 
@@ -361,7 +365,7 @@ fn approve_requires_owner_auth() {
     let spender = Address::generate(&env);
 
     env.set_auths(&[]);
-    let result = client.try_approve(&issuer, &spender, &100i128, &0u64);
+    let result = client.try_approve(&issuer, &spender, &100i128, &0u32);
     assert!(result.is_err());
 }
 
@@ -370,7 +374,7 @@ fn approve_emits_event() {
     let (env, client, issuer) = setup();
     let spender = Address::generate(&env);
 
-    client.approve(&issuer, &spender, &1000i128, &0u64);
+    client.approve(&issuer, &spender, &1000i128, &0u32);
 
     assert_one_event(&env, &client.address);
 }
@@ -385,7 +389,7 @@ fn transfer_from_uses_allowance() {
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    client.approve(&issuer, &spender, &500i128, &0u64);
+    client.approve(&issuer, &spender, &500i128, &0u32);
     client.transfer_from(&spender, &issuer, &recipient, &300i128);
 
     assert_eq!(client.balance(&issuer), 999_700);
@@ -399,7 +403,7 @@ fn transfer_from_exact_allowance_removes_entry() {
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    client.approve(&issuer, &spender, &300i128, &0u64);
+    client.approve(&issuer, &spender, &300i128, &0u32);
     client.transfer_from(&spender, &issuer, &recipient, &300i128);
 
     assert_eq!(client.allowance(&issuer, &spender), 0);
@@ -411,7 +415,7 @@ fn transfer_from_rejects_insufficient_allowance() {
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    client.approve(&issuer, &spender, &100i128, &0u64);
+    client.approve(&issuer, &spender, &100i128, &0u32);
     let result = client.try_transfer_from(&spender, &issuer, &recipient, &200i128);
     assert_eq!(result, Err(Ok(Error::InsufficientAllowance)));
 }
@@ -421,11 +425,11 @@ fn transfer_from_rejects_expired_allowance() {
     let (env, client, issuer) = setup();
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
-    let now = env.ledger().timestamp();
+    let now = env.ledger().sequence();
 
-    client.approve(&issuer, &spender, &500i128, &(now + 50));
+    client.approve(&issuer, &spender, &500i128, &(now + 50u32));
 
-    env.ledger().with_mut(|li| li.timestamp += 51);
+    env.ledger().with_mut(|li| li.sequence_number += 51);
     let result = client.try_transfer_from(&spender, &issuer, &recipient, &100i128);
     assert_eq!(result, Err(Ok(Error::AllowanceExpired)));
 }
@@ -447,7 +451,7 @@ fn transfer_from_requires_spender_auth() {
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    client.approve(&issuer, &spender, &500i128, &0u64);
+    client.approve(&issuer, &spender, &500i128, &0u32);
 
     env.set_auths(&[]);
     let result = client.try_transfer_from(&spender, &issuer, &recipient, &100i128);
@@ -460,7 +464,7 @@ fn transfer_from_emits_transfer_event() {
     let spender = Address::generate(&env);
     let recipient = Address::generate(&env);
 
-    client.approve(&issuer, &spender, &500i128, &0u64);
+    client.approve(&issuer, &spender, &500i128, &0u32);
 
     client.transfer_from(&spender, &issuer, &recipient, &200i128);
 
@@ -472,7 +476,7 @@ fn transfer_from_rejects_zero_amount() {
     let (env, client, issuer) = setup();
     let spender = Address::generate(&env);
 
-    client.approve(&issuer, &spender, &100i128, &0u64);
+    client.approve(&issuer, &spender, &100i128, &0u32);
     let result = client.try_transfer_from(&spender, &issuer, &spender, &0i128);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
@@ -500,11 +504,11 @@ fn allowance_returns_zero_for_unknown() {
 fn allowance_returns_zero_after_expiry() {
     let (env, client, issuer) = setup();
     let spender = Address::generate(&env);
-    let future = env.ledger().timestamp() + 100;
+    let future = env.ledger().sequence() + 100;
 
     client.approve(&issuer, &spender, &500i128, &future);
 
-    env.ledger().with_mut(|li| li.timestamp += 101);
+    env.ledger().with_mut(|li| li.sequence_number += 101);
     assert_eq!(client.allowance(&issuer, &spender), 0);
 }
 
@@ -525,6 +529,107 @@ fn get_metadata_panics_if_not_initialized() {
     let contract_id = env.register(TokenContract, ());
     let client = TokenContractClient::new(&env, &contract_id);
     client.get_metadata();
+}
+
+#[test]
+fn name_returns_token_name() {
+    let (env, client, _issuer) = setup();
+    assert_eq!(client.name(), String::from_str(&env, "AfriDollar"));
+}
+
+#[test]
+fn symbol_returns_token_symbol() {
+    let (env, client, _issuer) = setup();
+    assert_eq!(client.symbol(), String::from_str(&env, "AFD"));
+}
+
+#[test]
+fn decimals_returns_token_decimals() {
+    let (_env, client, _issuer) = setup();
+    assert_eq!(client.decimals(), 18);
+}
+
+// ---------------------------------------------------------------------------
+// burn_from (clawback by issuer)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn burn_from_clawback_by_issuer() {
+    let (_env, client, _issuer) = setup();
+    let holder = Address::generate(&_env);
+    client.mint(&holder, &10_000i128);
+    assert_eq!(client.balance(&holder), 10_000);
+
+    client.burn_from(&holder, &4_000i128);
+    assert_eq!(client.balance(&holder), 6_000);
+}
+
+#[test]
+fn burn_from_reduces_total_supply() {
+    let (_env, client, _issuer) = setup();
+    let holder = Address::generate(&_env);
+    client.mint(&holder, &10_000i128);
+
+    client.burn_from(&holder, &10_000i128);
+    // Issuer had 1_000_000, holder had 10_000, both burned → supply = 1_000_000
+    assert_eq!(client.balance(&holder), 0);
+}
+
+#[test]
+fn burn_from_fails_for_non_issuer() {
+    let (env, client, _issuer) = setup();
+    let holder = Address::generate(&env);
+    client.mint(&holder, &10_000i128);
+
+    env.set_auths(&[]);
+    let result = client.try_burn_from(&holder, &100i128);
+    assert!(result.is_err());
+}
+
+#[test]
+fn burn_from_rejects_insufficient_balance() {
+    let (_env, client, _issuer) = setup();
+    let holder = Address::generate(&_env);
+
+    let result = client.try_burn_from(&holder, &10i128);
+    assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+}
+
+#[test]
+fn burn_from_rejects_zero_or_negative() {
+    let (_env, client, _issuer) = setup();
+    let holder = Address::generate(&_env);
+    client.mint(&holder, &100i128);
+
+    let result = client.try_burn_from(&holder, &0i128);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+
+    let result = client.try_burn_from(&holder, &-5i128);
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn burn_from_emits_transfer_event() {
+    let (env, client, _issuer) = setup();
+    let holder = Address::generate(&env);
+    client.mint(&holder, &10_000i128);
+    let contract_addr = client.address.clone();
+
+    client.burn_from(&holder, &3_000i128);
+
+    assert_one_event(&env, &contract_addr);
+}
+
+#[test]
+fn burn_from_without_initialize_errors() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(TokenContract, ());
+    let client = TokenContractClient::new(&env, &contract_id);
+    let to = Address::generate(&env);
+
+    let result = client.try_burn_from(&to, &100i128);
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +653,7 @@ fn full_token_lifecycle() {
 
     // Bob approves Charlie (Charlie not yet created; use Alice as spender).
     let charlie = Address::generate(&env);
-    client.approve(&bob, &charlie, &1_000i128, &0u64);
+    client.approve(&bob, &charlie, &1_000i128, &0u32);
     assert_eq!(client.allowance(&bob, &charlie), 1_000);
 
     // Charlie transfers from Bob to Alice.

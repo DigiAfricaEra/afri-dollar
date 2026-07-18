@@ -5,7 +5,9 @@
 //! (holder), transfer, approve/delegate spending, balance queries, and
 //! immutable metadata after initialization.
 
-use afri_contract_shared::extend_instance_ttl;
+use afri_contract_shared::{
+    extend_instance_ttl, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
+};
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String,
 };
@@ -25,9 +27,9 @@ pub struct TokenMetadata {
 #[derive(Clone)]
 pub struct AllowanceValue {
     pub amount: i128,
-    /// Ledger timestamp at which this allowance expires.
+    /// Ledger number at which this allowance expires.
     /// `0` means never expires.
-    pub expires_at: u64,
+    pub expiration_ledger: u32,
 }
 
 /// Errors returned by the token contract.
@@ -68,7 +70,7 @@ pub struct TransferEvent {
 }
 
 /// Emitted whenever an allowance is set.
-#[contractevent(topics = ["approve"], data_format = "single-value")]
+#[contractevent(topics = ["approve"], data_format = "vec")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApproveEvent {
     #[topic]
@@ -76,6 +78,15 @@ pub struct ApproveEvent {
     #[topic]
     pub spender: Address,
     pub amount: i128,
+    pub expiration_ledger: u32,
+}
+
+/// Extend TTL for a persistent storage entry using the same thresholds as
+/// instance storage.
+pub(crate) fn extend_persistent_ttl(env: &Env, key: &DataKey) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 }
 
 #[contract]
@@ -118,9 +129,9 @@ impl TokenContract {
             .set(&DataKey::TotalSupply, &total_supply);
 
         if total_supply > 0 {
-            env.storage()
-                .persistent()
-                .set(&DataKey::Balance(issuer.clone()), &total_supply);
+            let key = DataKey::Balance(issuer.clone());
+            env.storage().persistent().set(&key, &total_supply);
+            extend_persistent_ttl(&env, &key);
         }
 
         extend_instance_ttl(&env);
@@ -156,9 +167,9 @@ impl TokenContract {
             .get(&DataKey::Balance(to.clone()))
             .unwrap_or(0);
         balance = balance.checked_add(amount).ok_or(Error::Overflow)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to.clone()), &balance);
+        let key = DataKey::Balance(to.clone());
+        env.storage().persistent().set(&key, &balance);
+        extend_persistent_ttl(&env, &key);
 
         let mut supply: i128 = env
             .storage()
@@ -199,9 +210,59 @@ impl TokenContract {
             return Err(Error::InsufficientBalance);
         }
         balance = balance.checked_sub(amount).ok_or(Error::Overflow)?;
-        env.storage()
+        let key = DataKey::Balance(from.clone());
+        env.storage().persistent().set(&key, &balance);
+        extend_persistent_ttl(&env, &key);
+
+        let mut supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
+        supply = supply.checked_sub(amount).ok_or(Error::Overflow)?;
+        env.storage().instance().set(&DataKey::TotalSupply, &supply);
+
+        extend_instance_ttl(&env);
+
+        TransferEvent {
+            from,
+            to: env.current_contract_address(),
+            amount,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Burn `amount` tokens from `from` on behalf of the issuer (clawback).
+    /// Only the contract admin (issuer) may call this. Fails with
+    /// [`Error::NotInitialized`] if the contract has not been initialized,
+    /// [`Error::Unauthorized`] if the caller is not the admin, or
+    /// [`Error::InsufficientBalance`] if the holder's balance is too low.
+    pub fn burn_from(env: Env, from: Address, amount: i128) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let mut balance: i128 = env
+            .storage()
             .persistent()
-            .set(&DataKey::Balance(from.clone()), &balance);
+            .get(&DataKey::Balance(from.clone()))
+            .unwrap_or(0);
+        if balance < amount {
+            return Err(Error::InsufficientBalance);
+        }
+        balance = balance.checked_sub(amount).ok_or(Error::Overflow)?;
+        let key = DataKey::Balance(from.clone());
+        env.storage().persistent().set(&key, &balance);
+        extend_persistent_ttl(&env, &key);
 
         let mut supply: i128 = env
             .storage()
@@ -242,9 +303,9 @@ impl TokenContract {
             return Err(Error::InsufficientBalance);
         }
         from_balance = from_balance.checked_sub(amount).ok_or(Error::Overflow)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(from.clone()), &from_balance);
+        let from_key = DataKey::Balance(from.clone());
+        env.storage().persistent().set(&from_key, &from_balance);
+        extend_persistent_ttl(&env, &from_key);
 
         let mut to_balance: i128 = env
             .storage()
@@ -252,9 +313,9 @@ impl TokenContract {
             .get(&DataKey::Balance(to.clone()))
             .unwrap_or(0);
         to_balance = to_balance.checked_add(amount).ok_or(Error::Overflow)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to.clone()), &to_balance);
+        let to_key = DataKey::Balance(to.clone());
+        env.storage().persistent().set(&to_key, &to_balance);
+        extend_persistent_ttl(&env, &to_key);
 
         extend_instance_ttl(&env);
 
@@ -264,15 +325,15 @@ impl TokenContract {
     }
 
     /// Set `spender`'s allowance to spend `amount` of the `owner`'s
-    /// tokens, optionally expiring at ledger timestamp `expires_at`.
-    /// Requires authorization from `owner`. Passing `0` for `expires_at`
+    /// tokens, optionally expiring at ledger number `expiration_ledger`.
+    /// Requires authorization from `owner`. Passing `0` for `expiration_ledger`
     /// means the allowance never expires.
     pub fn approve(
         env: Env,
         owner: Address,
         spender: Address,
         amount: i128,
-        expires_at: u64,
+        expiration_ledger: u32,
     ) -> Result<(), Error> {
         if amount < 0 {
             return Err(Error::InvalidAmount);
@@ -280,17 +341,19 @@ impl TokenContract {
 
         owner.require_auth();
 
-        let allowance = AllowanceValue { amount, expires_at };
+        let allowance = AllowanceValue {
+            amount,
+            expiration_ledger,
+        };
 
         if amount == 0 {
             env.storage()
                 .persistent()
                 .remove(&DataKey::Allowance(owner.clone(), spender.clone()));
         } else {
-            env.storage().persistent().set(
-                &DataKey::Allowance(owner.clone(), spender.clone()),
-                &allowance,
-            );
+            let allowance_key = DataKey::Allowance(owner.clone(), spender.clone());
+            env.storage().persistent().set(&allowance_key, &allowance);
+            extend_persistent_ttl(&env, &allowance_key);
         }
 
         extend_instance_ttl(&env);
@@ -299,6 +362,7 @@ impl TokenContract {
             owner,
             spender,
             amount,
+            expiration_ledger,
         }
         .publish(&env);
 
@@ -329,7 +393,8 @@ impl TokenContract {
             .get(&DataKey::Allowance(from.clone(), spender.clone()))
             .ok_or(Error::InsufficientAllowance)?;
 
-        if allowance.expires_at > 0 && env.ledger().timestamp() >= allowance.expires_at {
+        if allowance.expiration_ledger > 0 && env.ledger().sequence() >= allowance.expiration_ledger
+        {
             return Err(Error::AllowanceExpired);
         }
         if allowance.amount < amount {
@@ -346,10 +411,9 @@ impl TokenContract {
                 .persistent()
                 .remove(&DataKey::Allowance(from.clone(), spender.clone()));
         } else {
-            env.storage().persistent().set(
-                &DataKey::Allowance(from.clone(), spender.clone()),
-                &allowance,
-            );
+            let allowance_key = DataKey::Allowance(from.clone(), spender.clone());
+            env.storage().persistent().set(&allowance_key, &allowance);
+            extend_persistent_ttl(&env, &allowance_key);
         }
 
         // Transfer tokens.
@@ -362,9 +426,9 @@ impl TokenContract {
             return Err(Error::InsufficientBalance);
         }
         from_balance = from_balance.checked_sub(amount).ok_or(Error::Overflow)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(from.clone()), &from_balance);
+        let from_key = DataKey::Balance(from.clone());
+        env.storage().persistent().set(&from_key, &from_balance);
+        extend_persistent_ttl(&env, &from_key);
 
         let mut to_balance: i128 = env
             .storage()
@@ -372,9 +436,9 @@ impl TokenContract {
             .get(&DataKey::Balance(to.clone()))
             .unwrap_or(0);
         to_balance = to_balance.checked_add(amount).ok_or(Error::Overflow)?;
-        env.storage()
-            .persistent()
-            .set(&DataKey::Balance(to.clone()), &to_balance);
+        let to_key = DataKey::Balance(to.clone());
+        env.storage().persistent().set(&to_key, &to_balance);
+        extend_persistent_ttl(&env, &to_key);
 
         extend_instance_ttl(&env);
 
@@ -401,7 +465,7 @@ impl TokenContract {
             .get::<DataKey, AllowanceValue>(&DataKey::Allowance(owner, spender))
         {
             Some(a) => {
-                if a.expires_at > 0 && env.ledger().timestamp() >= a.expires_at {
+                if a.expiration_ledger > 0 && env.ledger().sequence() >= a.expiration_ledger {
                     0
                 } else {
                     a.amount
@@ -418,6 +482,33 @@ impl TokenContract {
             .instance()
             .get(&DataKey::Metadata)
             .unwrap_or_else(|| panic!("contract not initialized"))
+    }
+
+    /// Return the token name. Panics if not initialized.
+    pub fn name(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get::<DataKey, TokenMetadata>(&DataKey::Metadata)
+            .unwrap_or_else(|| panic!("contract not initialized"))
+            .name
+    }
+
+    /// Return the token symbol. Panics if not initialized.
+    pub fn symbol(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get::<DataKey, TokenMetadata>(&DataKey::Metadata)
+            .unwrap_or_else(|| panic!("contract not initialized"))
+            .symbol
+    }
+
+    /// Return the token decimals. Panics if not initialized.
+    pub fn decimals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get::<DataKey, TokenMetadata>(&DataKey::Metadata)
+            .unwrap_or_else(|| panic!("contract not initialized"))
+            .decimals
     }
 }
 
