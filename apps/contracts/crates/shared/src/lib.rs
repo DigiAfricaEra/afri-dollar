@@ -78,7 +78,7 @@ pub fn get_version(env: &Env) -> ContractVersion {
             major: 1,
             minor: 0,
             patch: 0,
-            wasm_hash: env.deployer().get_current_contract_wasm_hash(),
+            wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
         })
 }
 
@@ -179,7 +179,7 @@ pub fn execute_upgrade(env: &Env, proposal_id: u64) -> Result<(), Error> {
         major: current_version.major + 1,
         minor: 0,
         patch: 0,
-        wasm_hash: proposal.new_wasm_hash,
+        wasm_hash: proposal.new_wasm_hash.clone(),
     };
     set_version(env, &new_version);
 
@@ -227,13 +227,13 @@ pub fn rollback_upgrade(env: &Env, admin: &Address) -> Result<(), Error> {
         .get(&UpgradeDataKey::PreviousWasmHash);
 
     if let Some(hash) = previous_hash {
-        env.deployer().update_current_contract_wasm(hash);
+        env.deployer().update_current_contract_wasm(hash.clone());
         let current = get_version(env);
         let rolled_back = ContractVersion {
             major: current.major,
             minor: current.minor,
             patch: current.patch + 1,
-            wasm_hash: hash,
+            wasm_hash: hash.clone(),
         };
         set_version(env, &rolled_back);
     }
