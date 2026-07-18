@@ -12,6 +12,7 @@ import type {
   ReportType,
   ReportFormat,
   ReportRequest,
+  ReportTemplate,
   ReportParameters,
   ReportData,
   ReportStatus,
@@ -68,6 +69,24 @@ function mapReport(report: {
     createdAt: report.createdAt,
     completedAt: report.completedAt ?? undefined,
     downloadUrl: report.downloadUrl ?? undefined,
+  };
+}
+
+function mapReportTemplate(template: {
+  id: string;
+  name: string;
+  reportType: string;
+  format: string;
+  query: string | null;
+  schedule: string | null;
+}): ReportTemplate {
+  return {
+    id: template.id,
+    name: template.name,
+    reportType: template.reportType as ReportType,
+    format: template.format as ReportFormat,
+    query: template.query ?? undefined,
+    schedule: template.schedule ?? undefined,
   };
 }
 
@@ -463,5 +482,83 @@ export const ReportService = {
       filename: getFileName(report.reportType as ReportType, format),
       mimetype: getMimeType(format),
     };
+  },
+
+  async listTemplates(): Promise<ReportTemplate[]> {
+    const templates = await prisma.reportTemplate.findMany({
+      orderBy: { name: 'asc' },
+    });
+
+    return templates.map(mapReportTemplate);
+  },
+
+  async createTemplate(data: {
+    name: string;
+    reportType: string;
+    format: string;
+    query?: string;
+    schedule?: string;
+  }): Promise<ReportTemplate> {
+    const template = await prisma.reportTemplate.create({
+      data: {
+        name: data.name,
+        reportType: data.reportType,
+        format: data.format,
+        query: data.query ?? null,
+        schedule: data.schedule ?? null,
+      },
+    });
+
+    return mapReportTemplate(template);
+  },
+
+  async getTemplate(id: string): Promise<ReportTemplate> {
+    const template = await prisma.reportTemplate.findUnique({ where: { id } });
+
+    if (!template) {
+      throw new AppError(404, 'Report template not found');
+    }
+
+    return mapReportTemplate(template);
+  },
+
+  async updateTemplate(
+    id: string,
+    data: {
+      name?: string;
+      reportType?: string;
+      format?: string;
+      query?: string;
+      schedule?: string;
+    }
+  ): Promise<ReportTemplate> {
+    const existing = await prisma.reportTemplate.findUnique({ where: { id } });
+
+    if (!existing) {
+      throw new AppError(404, 'Report template not found');
+    }
+
+    const template = await prisma.reportTemplate.update({
+      where: { id },
+      data: {
+        ...(data.name !== undefined && { name: data.name }),
+        ...(data.reportType !== undefined && { reportType: data.reportType }),
+        ...(data.format !== undefined && { format: data.format }),
+        ...(data.query !== undefined && { query: data.query }),
+        ...(data.schedule !== undefined && { schedule: data.schedule }),
+      },
+    });
+
+    return mapReportTemplate(template);
+  },
+
+  async deleteTemplate(id: string): Promise<void> {
+    const existing = await prisma.reportTemplate.findUnique({ where: { id } });
+
+    if (!existing) {
+      throw new AppError(404, 'Report template not found');
+    }
+
+    await prisma.reportTemplate.delete({ where: { id } });
   },
 };

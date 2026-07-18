@@ -4,7 +4,13 @@ import { z } from 'zod';
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { ReportService } from '../services/report.service';
 import { AppError } from '../types';
-import { generateReportSchema, reportIdParamSchema } from '../utils/validation';
+import {
+  createReportTemplateSchema,
+  generateReportSchema,
+  reportIdParamSchema,
+  reportTemplateIdParamSchema,
+  updateReportTemplateSchema,
+} from '../utils/validation';
 
 const listReportsQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
@@ -95,6 +101,61 @@ export const ReportController = {
       res.on('close', () => stream.destroy());
 
       stream.pipe(res);
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  async listTemplates(_req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const templates = await ReportService.listTemplates();
+
+      res.status(200).json({ success: true, data: templates });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  async createTemplate(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const data = createReportTemplateSchema.parse(req.body);
+      const template = await ReportService.createTemplate(data);
+
+      res.status(201).json({ success: true, data: template });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  async getTemplate(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { templateId } = reportTemplateIdParamSchema.parse(req.params);
+      const template = await ReportService.getTemplate(templateId);
+
+      res.status(200).json({ success: true, data: template });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  async updateTemplate(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { templateId } = reportTemplateIdParamSchema.parse(req.params);
+      const data = updateReportTemplateSchema.parse(req.body);
+      const template = await ReportService.updateTemplate(templateId, data);
+
+      res.status(200).json({ success: true, data: template });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  async deleteTemplate(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const { templateId } = reportTemplateIdParamSchema.parse(req.params);
+      await ReportService.deleteTemplate(templateId);
+
+      res.status(200).json({ success: true });
     } catch (error) {
       handleError(res, error);
     }

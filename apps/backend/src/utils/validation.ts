@@ -92,3 +92,24 @@ export const generateReportSchema = z.object({
 export const reportIdParamSchema = z.object({
   id: z.string().min(1, 'Report ID is required'),
 });
+
+export const createReportTemplateSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  reportType: z.enum([
+    'transaction-history',
+    'compliance-report',
+    'financial-statement',
+    'payroll-report',
+    'treasury-report',
+    'audit-log',
+  ]),
+  format: z.enum(['csv', 'pdf', 'xlsx']),
+  query: z.string().optional(),
+  schedule: z.string().optional(),
+});
+
+export const updateReportTemplateSchema = createReportTemplateSchema.partial();
+
+export const reportTemplateIdParamSchema = z.object({
+  templateId: z.string().min(1, 'Template ID is required'),
+});

@@ -28,7 +28,7 @@ export interface ReportTemplate {
   id: string;
   name: string;
   reportType: ReportType;
-  query: string;
+  query?: string;
   format: ReportFormat;
   schedule?: string;
 }
