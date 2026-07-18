@@ -83,7 +83,32 @@ function getErrorResponse(error: Error): { status: number; message: string } {
     },
   };
 
-  return errorMap[error.message] || { status: 500, message: 'An error occurred' };
+  return errorMap[error.message] ?? { status: 500, message: 'An error occurred' };
+}
+
+function handleError(res: Response, error: unknown): void {
+  if (error instanceof z.ZodError) {
+    res.status(400).json({
+      success: false,
+      error: 'Validation error',
+      details: error.errors,
+    });
+    return;
+  }
+
+  if (error instanceof Error) {
+    const { status, message } = getErrorResponse(error);
+    res.status(status).json({
+      success: false,
+      error: message,
+    });
+    return;
+  }
+
+  res.status(500).json({
+    success: false,
+    error: 'Internal server error',
+  });
 }
 
 export const FXController = {
@@ -97,28 +122,7 @@ export const FXController = {
         data: rates,
       });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
-
-      if (error instanceof Error) {
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
-      }
-
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -136,28 +140,7 @@ export const FXController = {
         data: quote,
       });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
-
-      if (error instanceof Error) {
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
-      }
-
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -179,28 +162,7 @@ export const FXController = {
         data: result,
       });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
-
-      if (error instanceof Error) {
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
-      }
-
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -228,28 +190,7 @@ export const FXController = {
         data: history,
       });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
-
-      if (error instanceof Error) {
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
-      }
-
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
@@ -263,28 +204,7 @@ export const FXController = {
         data: rate,
       });
     } catch (error) {
-      if (error instanceof z.ZodError) {
-        res.status(400).json({
-          success: false,
-          error: 'Validation error',
-          details: error.errors,
-        });
-        return;
-      }
-
-      if (error instanceof Error) {
-        const { status, message } = getErrorResponse(error);
-        res.status(status).json({
-          success: false,
-          error: message,
-        });
-        return;
-      }
-
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-      });
+      handleError(res, error);
     }
   },
 
