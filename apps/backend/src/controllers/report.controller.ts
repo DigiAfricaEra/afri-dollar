@@ -89,12 +89,10 @@ export const ReportController = {
         console.error('Report download stream error:', err);
         if (!res.headersSent) {
           res.status(500).json({ success: false, error: 'Download failed' });
-        }
-      });
-
-      res.on('close', () => stream.destroy());
-
-      stream.pipe(res);
+        } else {
+          res.destroy(err);
+         }
+       });
     } catch (error) {
       handleError(res, error);
     }
