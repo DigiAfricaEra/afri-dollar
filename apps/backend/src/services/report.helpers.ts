@@ -1,18 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 
+import { Decimal } from '@prisma/client/runtime/library';
 import { createObjectCsvWriter } from 'csv-writer';
 import { Workbook } from 'exceljs';
 import PDFDocument from 'pdfkit';
 
 import prisma from '../config/database';
 import { AppError } from '../types';
-import type {
-  ReportType,
-  ReportFormat,
-  ReportParameters,
-  ReportData,
-} from '../types';
+import type { ReportType, ReportFormat, ReportParameters, ReportData } from '../types';
 
 const REPORTS_DIR = path.resolve(__dirname, '../../uploads/reports');
 
@@ -71,7 +67,11 @@ async function fetchTransactionHistory(
   if (params?.assetCode != null) where.assetCode = params.assetCode;
   if (params?.status != null) where.status = params.status;
 
-  return prisma.transaction.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit ?? REPORT_FETCH_LIMIT });
+  return prisma.transaction.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: limit ?? REPORT_FETCH_LIMIT,
+  });
 }
 
 async function fetchComplianceData(
@@ -115,7 +115,11 @@ async function fetchFinancialStatement(
       (where.createdAt as Record<string, unknown>).lte = new Date(params.endDate);
   }
 
-  return prisma.transaction.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit ?? REPORT_FETCH_LIMIT });
+  return prisma.transaction.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: limit ?? REPORT_FETCH_LIMIT,
+  });
 }
 
 async function fetchPayrollReport(
@@ -134,7 +138,7 @@ async function fetchPayrollReport(
     description: batch.description ?? '',
     status: batch.status,
     itemCount: batch.items.length,
-    totalAmount: batch.items.reduce((sum, item) => sum + Number(item.amount), 0).toString(),
+    totalAmount: Decimal.sum(...batch.items.map((item) => item.amount)).toString(),
     createdAt: batch.createdAt,
   }));
 }
@@ -159,10 +163,7 @@ async function fetchTreasuryReport(
   );
 }
 
-async function fetchAuditLogs(
-  params?: ReportParameters,
-  limit?: number
-): Promise<ReportData[]> {
+async function fetchAuditLogs(params?: ReportParameters, limit?: number): Promise<ReportData[]> {
   const where: Record<string, unknown> = {};
 
   if (params?.startDate != null || params?.endDate != null) {
@@ -175,7 +176,11 @@ async function fetchAuditLogs(
 
   if (params?.userId != null) where.userId = params.userId;
 
-  return prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit ?? REPORT_FETCH_LIMIT });
+  return prisma.auditLog.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: limit ?? REPORT_FETCH_LIMIT,
+  });
 }
 
 export function getDataFetcher(
@@ -210,7 +215,11 @@ export async function generateCSV(data: ReportData[], filePath: string): Promise
   await writer.writeRecords(data);
 }
 
-export async function generatePDF(data: ReportData[], filePath: string, title: string): Promise<void> {
+export async function generatePDF(
+  data: ReportData[],
+  filePath: string,
+  title: string
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 30 });
     const stream = fs.createWriteStream(filePath);
