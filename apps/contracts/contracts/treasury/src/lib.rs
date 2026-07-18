@@ -76,6 +76,10 @@ enum DataKey {
     NextRecordId,
     /// `ClawbackRecord`, keyed by `id`.
     ClawbackRecord(u64),
+    /// Per-asset counter for the number of clawback records.
+    AssetRecordCounter(Address),
+    /// Per-asset mapping from local index to global record ID.
+    AssetRecordId(Address, u64),
 }
 
 /// Emitted when clawback is enabled for an asset.
@@ -138,13 +142,14 @@ pub struct TreasuryContract;
 #[contractimpl]
 impl TreasuryContract {
     /// Initialize the contract, recording `admin`.
-    /// Must be called atomically during deployment (same transaction) to
-    /// prevent front-running. Fails with `Error::AlreadyInitialized` if
-    /// called twice.
+    /// Requires the caller to authenticate as `admin`. Must be called
+    /// atomically during deployment (same transaction) to prevent
+    /// front-running. Fails with `Error::AlreadyInitialized` if called twice.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
+        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextRecordId, &1u64);
         extend_instance_ttl(&env);
@@ -280,6 +285,22 @@ impl TreasuryContract {
             .set(&DataKey::ClawbackRecord(record_id), &record);
         extend_persistent_ttl(&env, &DataKey::ClawbackRecord(record_id));
 
+        // Track per-asset record index for efficient filtered queries.
+        let asset_count_key = DataKey::AssetRecordCounter(asset.clone());
+        let asset_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&asset_count_key)
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &DataKey::AssetRecordId(asset.clone(), asset_count),
+            &record_id,
+        );
+        env.storage()
+            .persistent()
+            .set(&asset_count_key, &(asset_count + 1));
+        extend_persistent_ttl(&env, &asset_count_key);
+
         let next_id = record_id.checked_add(1).ok_or(Error::Overflow)?;
         env.storage()
             .instance()
@@ -320,29 +341,50 @@ impl TreasuryContract {
         asset: Option<Address>,
         limit: u32,
     ) -> Vec<ClawbackRecord> {
-        let next_id: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextRecordId)
-            .unwrap_or(1);
-
-        let max_records = if limit == 0 { 0 } else { limit };
-        let count = (next_id - 1).min(max_records as u64);
+        let max_records = if limit == 0 { 0 } else { limit as u64 };
         let mut records: Vec<ClawbackRecord> = Vec::new(&env);
 
-        for i in 0..count {
-            let id = next_id - 1 - i;
-            if let Some(record) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, ClawbackRecord>(&DataKey::ClawbackRecord(id))
-            {
-                let matches = match &asset {
-                    None => true,
-                    Some(filter_asset) => record.asset == *filter_asset,
-                };
-                if matches {
-                    records.push_back(record);
+        match asset {
+            None => {
+                let next_id: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::NextRecordId)
+                    .unwrap_or(1);
+                let count = (next_id - 1).min(max_records);
+                for i in 0..count {
+                    let id = next_id - 1 - i;
+                    if let Some(record) = env
+                        .storage()
+                        .persistent()
+                        .get::<DataKey, ClawbackRecord>(&DataKey::ClawbackRecord(id))
+                    {
+                        records.push_back(record);
+                    }
+                }
+            }
+            Some(ref asset_addr) => {
+                let asset_count: u64 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::AssetRecordCounter(asset_addr.clone()))
+                    .unwrap_or(0);
+                let count = asset_count.min(max_records);
+                for i in 0..count {
+                    let idx = asset_count - 1 - i;
+                    if let Some(record_id) = env
+                        .storage()
+                        .persistent()
+                        .get::<DataKey, u64>(&DataKey::AssetRecordId(asset_addr.clone(), idx))
+                    {
+                        if let Some(record) = env
+                            .storage()
+                            .persistent()
+                            .get::<DataKey, ClawbackRecord>(&DataKey::ClawbackRecord(record_id))
+                        {
+                            records.push_back(record);
+                        }
+                    }
                 }
             }
         }

@@ -79,18 +79,29 @@ fn initialize_is_one_time_only() {
 }
 
 #[test]
-fn initialize_sets_admin_without_explicit_auth() {
+fn initialize_requires_admin_auth() {
     let env = Env::default();
     let contract_id = env.register(TreasuryContract, ());
     let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    // No auth mocking — initialize does NOT require the admin to sign.
-    // The deployer must call it atomically in the same transaction.
+    env.mock_all_auths();
     client.initialize(&admin);
-    // Admin-gated operations still require the stored admin's auth.
+    // Clear auths — admin-gated operations still require the stored admin's auth.
+    env.set_auths(&[]);
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     let result = client.try_enable_clawback(&asset, &authority, &true);
+    assert!(result.is_err());
+}
+
+#[test]
+fn initialize_fails_without_admin_auth() {
+    let env = Env::default();
+    let contract_id = env.register(TreasuryContract, ());
+    let client = TreasuryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    // No auth set — initialize requires the admin to sign.
+    let result = client.try_initialize(&admin);
     assert!(result.is_err());
 }
 
@@ -541,4 +552,42 @@ fn get_clawback_history_honors_limit() {
     assert_eq!(history.len(), 2);
     assert_eq!(history.get(0).unwrap().id, 4);
     assert_eq!(history.get(1).unwrap().id, 3);
+}
+
+#[test]
+fn get_clawback_history_returns_asset_records_when_interleaved() {
+    let (env, client, _admin) = setup();
+    let authority = Address::generate(&env);
+    let from = Address::generate(&env);
+    let (asset_a, _at_a, mint_a) = create_token(&env, &client.address);
+    let (asset_b, _at_b, mint_b) = create_token(&env, &client.address);
+    client.enable_clawback(&asset_a, &authority, &false);
+    client.enable_clawback(&asset_b, &authority, &false);
+    mint_a.mint(&from, &10_000i128);
+    mint_b.mint(&from, &10_000i128);
+    mint_a.set_authorized(&from, &false);
+    mint_b.set_authorized(&from, &false);
+
+    let reason = String::from_str(&env, "batch");
+    // Interleave: A(100), B(200), A(300), B(400), A(500)
+    client.execute_clawback(&authority, &from, &asset_a, &100i128, &reason);
+    client.execute_clawback(&authority, &from, &asset_b, &200i128, &reason);
+    client.execute_clawback(&authority, &from, &asset_a, &300i128, &reason);
+    client.execute_clawback(&authority, &from, &asset_b, &400i128, &reason);
+    client.execute_clawback(&authority, &from, &asset_a, &500i128, &reason);
+
+    // Query asset A with limit 2 — returns A(500) and A(300), not B records.
+    let history = client.get_clawback_history(&Some(asset_a.clone()), &2u32);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history.get(0).unwrap().id, 5);
+    assert_eq!(history.get(0).unwrap().amount, 500);
+    assert_eq!(history.get(1).unwrap().id, 3);
+    assert_eq!(history.get(1).unwrap().amount, 300);
+
+    // Query asset A with limit 10 — returns all 3 A records.
+    let history_all = client.get_clawback_history(&Some(asset_a), &10u32);
+    assert_eq!(history_all.len(), 3);
+    assert_eq!(history_all.get(0).unwrap().id, 5);
+    assert_eq!(history_all.get(1).unwrap().id, 3);
+    assert_eq!(history_all.get(2).unwrap().id, 1);
 }
