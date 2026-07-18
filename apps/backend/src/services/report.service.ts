@@ -28,7 +28,7 @@ if (!fs.existsSync(REPORTS_DIR)) {
 // ----- Helpers -----
 
 function buildDownloadUrl(requestId: string): string {
-  return `${BASE_URL}/download/${requestId}`;
+  return `${BASE_URL}/${requestId}/download`;
 }
 
 function getFilePath(requestId: string, format: ReportFormat): string {
