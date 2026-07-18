@@ -1,7 +1,7 @@
 #![no_std]
 //! Shared building blocks for AfriDollar Soroban contracts.
 
-use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, Vec};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env};
 
 pub const DAY_IN_LEDGERS: u32 = 17_280;
 pub const INSTANCE_BUMP_AMOUNT: u32 = 7 * DAY_IN_LEDGERS;
