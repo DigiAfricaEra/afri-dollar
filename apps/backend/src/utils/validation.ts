@@ -67,3 +67,103 @@ export const createCrossBorderPaymentSchema = z.object({
 export const paymentIdParamSchema = z.object({
   id: z.string().min(1, 'Payment ID is required'),
 });
+
+const reportParametersSchema = z
+  .object({
+    startDate: z
+      .string()
+      .refine((val) => !isNaN(Date.parse(val)), {
+        message: 'startDate must be a valid date string',
+      })
+      .optional(),
+    endDate: z
+      .string()
+      .refine((val) => !isNaN(Date.parse(val)), {
+        message: 'endDate must be a valid date string',
+      })
+      .optional(),
+    assetCode: z.string().optional(),
+    status: z.string().optional(),
+  })
+  .refine(
+    ({ startDate, endDate }) => {
+      if (startDate == null || endDate == null) return true;
+      return new Date(startDate) <= new Date(endDate);
+    },
+    {
+      message: 'startDate must be less than or equal to endDate',
+      path: ['startDate'],
+    }
+  )
+  .optional();
+
+export const generateReportSchema = z.object({
+  reportType: z.enum([
+    'transaction-history',
+    'compliance-report',
+    'financial-statement',
+    'payroll-report',
+    'treasury-report',
+    'audit-log',
+  ]),
+  format: z.enum(['csv', 'pdf', 'xlsx']),
+  parameters: reportParametersSchema,
+});
+
+export const generateAdminReportSchema = z.object({
+  reportType: z.enum([
+    'transaction-history',
+    'compliance-report',
+    'financial-statement',
+    'payroll-report',
+    'treasury-report',
+    'audit-log',
+  ]),
+  format: z.enum(['csv', 'pdf', 'xlsx']),
+  targetUserId: z.string().optional(),
+  parameters: reportParametersSchema,
+});
+
+export const reportIdParamSchema = z.object({
+  id: z.string().min(1, 'Report ID is required'),
+});
+
+function isValidCronExpression(val: string): boolean {
+  const parts = val.trim().split(/\s+/);
+  if (parts.length !== 5) return false;
+  const patterns = [
+    /^(\*|[0-5]?\d)$/,
+    /^(\*|[01]?\d|2[0-3])$/,
+    /^(\*|[12]?\d|3[01])$/,
+    /^(\*|1[012]|[1-9])$/,
+    /^(\*|[0-6])$/,
+  ];
+  return parts.every((part, i) => patterns[i].test(part));
+}
+
+export const createReportTemplateSchema = z.object({
+  name: z.string().min(1, 'Name is required'),
+  reportType: z.enum([
+    'transaction-history',
+    'compliance-report',
+    'financial-statement',
+    'payroll-report',
+    'treasury-report',
+    'audit-log',
+  ]),
+  format: z.enum(['csv', 'pdf', 'xlsx']),
+  query: z.string().optional(),
+  schedule: z
+    .string()
+    .optional()
+    .refine((val) => val === undefined || isValidCronExpression(val), {
+      message:
+        'Invalid cron expression. Must be 5-field cron syntax (minute hour day-of-month month day-of-week)',
+    }),
+});
+
+export const updateReportTemplateSchema = createReportTemplateSchema.partial();
+
+export const reportTemplateIdParamSchema = z.object({
+  templateId: z.string().min(1, 'Template ID is required'),
+});

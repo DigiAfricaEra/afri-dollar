@@ -11,7 +11,6 @@ import helmet from 'helmet';
 interface MountableRouter {
   (req: express.Request, res: express.Response, next: express.NextFunction): void;
 }
-
 import prisma from './config/database';
 import { errorMiddleware } from './middleware/error.middleware';
 import auditRouter from './routes/audit.routes';
@@ -20,11 +19,13 @@ import fxRouter, { adminFxRouter } from './routes/fx.routes';
 import jobRouter from './routes/job.routes';
 import paymentRouter from './routes/payment.routes';
 import payrollRouter from './routes/payroll.routes';
+import reportRouter from './routes/report.routes';
 import securityRouter from './routes/security.routes';
 import stellarRouter from './routes/stellar.routes';
 import treasuryRouter from './routes/treasury.routes';
 import walletRouter from './routes/wallet.routes';
 import { jobQueueService } from './services/job-queue.service';
+import { reportWorker } from './services/report-worker.service';
 // Load backend-level .env file
 config({ path: path.resolve(__dirname, '../.env') });
 
@@ -91,6 +92,9 @@ app.use('/api/v1/wallet', walletRouter as MountableRouter);
 // Job routes (admin only)
 app.use('/api/v1/jobs', jobRouter as MountableRouter);
 
+// Report routes
+app.use('/api/v1/reports', reportRouter as MountableRouter);
+
 // Global error handler
 app.use(errorMiddleware);
 
@@ -102,6 +106,7 @@ async function startServer(): Promise<void> {
     console.log('🐘 Database connected successfully');
 
     await jobQueueService.start();
+    await reportWorker.start();
 
     httpServer = app.listen(PORT, () => {
       console.log(`🚀 AfriDollar Backend API running on port ${PORT}`);
@@ -137,6 +142,7 @@ function shutdown(signal: 'SIGTERM' | 'SIGINT'): void {
   console.log(`${signal} signal received: closing HTTP server`);
   void closeHttpServer()
     .then(() => jobQueueService.stop())
+    .then(() => reportWorker.stop())
     .then(() => prisma.$disconnect())
     .catch((error) => {
       console.error('Graceful shutdown failed:', error);

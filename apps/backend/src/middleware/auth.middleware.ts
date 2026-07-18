@@ -39,7 +39,7 @@ export const authMiddleware = (req: AuthRequest, res: Response, next: NextFuncti
     // Get token from Authorization header
     const authHeader = req.headers.authorization;
 
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (!authHeader?.startsWith('Bearer ')) {
       res.status(401).json({
         success: false,
         error: 'Access token is required',
