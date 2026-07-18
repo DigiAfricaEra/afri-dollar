@@ -1,6 +1,6 @@
 [package]
 name = "treasury"
-description = "Treasury clawback contract for AfriDollar — regulatory clawback of compliant assets"
+description = "AfriDollar treasury contract with time-locked withdrawal mechanism"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,13 +9,12 @@ repository.workspace = true
 publish = false
 
 [lib]
-# `cdylib` produces the WASM artifact; `rlib` lets other crates/tests link it.
 crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
 soroban-sdk = { workspace = true }
-afri-contract-shared = { workspace = true }
+afri-contract-shared = { workspace =true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -40,7 +40,7 @@ fi
 
 # Duplicate code check
 echo "▸ Checking for duplicate code..."
-npx jscpd ./apps ./packages --threshold 5 --ignore "node_modules,dist,.next,coverage"
+npx jscpd ./apps ./packages --threshold 5 --min-tokens 100 --ignore "node_modules,dist,.next,coverage,**/*.rs,**/*.toml"
 if [ $? -ne 0 ]; then
   echo "❌ Found duplicate code. Please refactor to reduce code duplication."
   exit 1

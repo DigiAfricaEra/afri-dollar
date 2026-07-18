@@ -3,6 +3,6 @@
 # because it enables WASM features the Soroban environment cannot run.
 [toolchain]
 channel = "stable"
-components = ["rustfmt", "clippy"]
 targets = ["wasm32v1-none"]
+components = ["rustfmt", "clippy"]
 profile = "minimal"

@@ -247,7 +247,7 @@ export class ReportWorkerService {
     if (!this.queue) return;
 
     const jobs = await this.queue.getRepeatableJobs();
-    const job = jobs.find((j) => j.id === `template-${templateId}`);
+    const job = jobs.find((j: { id?: string; key: string }) => j.id === `template-${templateId}`);
 
     if (job) {
       await this.queue.removeRepeatableByKey(job.key);

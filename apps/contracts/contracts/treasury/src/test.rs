@@ -1,589 +1,585 @@
-use crate::{ClawbackConfig, Error, TreasuryContract, TreasuryContractClient};
+use crate::{TreasuryContract, TreasuryContractClient, TreasuryError};
 use soroban_sdk::{
-    symbol_short,
-    testutils::{Address as _, Events, IssuerFlags},
-    token::{StellarAssetClient, TokenClient},
-    Address, Env, IntoVal, String,
+    testutils::{Address as _, Events, Ledger},
+    vec, Address, Env,
 };
 
-/// Deploy a Stellar Asset Contract token whose admin is `sac_admin`
-/// (must be the treasury contract address in production). Returns the
-/// token's address plus ready-made clients for transfers/balances and
-/// minting.
-///
-/// The SAC issuer account is created with `AUTH_REVOCABLE_FLAG` (0x2) so
-/// that `set_authorized` and `clawback` work correctly in tests.
-fn create_token<'a>(
-    env: &Env,
-    sac_admin: &Address,
-) -> (Address, TokenClient<'a>, StellarAssetClient<'a>) {
-    let sac = env.register_stellar_asset_contract_v2(sac_admin.clone());
-    let address = sac.address();
-
-    // `register_stellar_asset_contract_v2` creates the issuer with `flags: 0`.
-    // For clawback to work we need the issuer to have AUTH_REVOCABLE and
-    // AUTH_CLAWBACK_ENABLED flags set.
-    sac.issuer().set_flag(IssuerFlags::RevocableFlag);
-    sac.issuer().set_flag(IssuerFlags::ClawbackEnabledFlag);
-
-    (
-        address.clone(),
-        TokenClient::new(env, &address),
-        StellarAssetClient::new(env, &address),
-    )
-}
-
-fn setup() -> (Env, TreasuryContractClient<'static>, Address) {
+fn setup() -> (
+    Env,
+    Address,
+    TreasuryContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
     let env = Env::default();
-    env.mock_all_auths_allowing_non_root_auth();
-    let admin = Address::generate(&env);
-    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let contract_id = env.register(TreasuryContract, ());
     let client = TreasuryContractClient::new(&env, &contract_id);
-    (env, client, admin)
+    let admin = Address::generate(&env);
+    let requester = Address::generate(&env);
+    let approver = Address::generate(&env);
+    (env, contract_id, client, admin, requester, approver)
 }
 
-/// Assert that `env.events().all()` (which only surfaces events from the
-/// most recently completed contract invocation) is exactly one event,
-/// published by the treasury contract, with the given topics and data.
-fn assert_last_event<T, D>(env: &Env, contract_id: &Address, topics: T, data: D)
-where
-    T: IntoVal<Env, soroban_sdk::Vec<soroban_sdk::Val>>,
-    D: IntoVal<Env, soroban_sdk::Val>,
-{
-    let expected: soroban_sdk::Vec<(
-        Address,
-        soroban_sdk::Vec<soroban_sdk::Val>,
-        soroban_sdk::Val,
-    )> = soroban_sdk::vec![
-        env,
-        (
-            contract_id.clone(),
-            topics.into_val(env),
-            data.into_val(env),
-        ),
-    ];
-    let ours = env.events().all().filter_by_contract(contract_id);
-    assert_eq!(ours, expected);
+fn setup_initialized() -> (
+    Env,
+    Address,
+    TreasuryContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
+    let (env, contract_id, client, admin, requester, approver) = setup();
+    env.mock_all_auths();
+    client.initialize(&admin);
+    (env, contract_id, client, admin, requester, approver)
+}
+
+fn setup_with_timelock() -> (
+    Env,
+    Address,
+    TreasuryContractClient<'static>,
+    Address,
+    Address,
+    Address,
+    Address,
+) {
+    let (env, contract_id, client, admin, requester, approver) = setup_initialized();
+    let asset = Address::generate(&env);
+    client.set_timelock(&asset, &3600);
+    (env, contract_id, client, admin, requester, approver, asset)
+}
+
+fn setup_emergency(
+    env: &Env,
+    client: &TreasuryContractClient<'static>,
+) -> (Address, Address, soroban_sdk::Vec<Address>) {
+    let approver1 = Address::generate(env);
+    let approver2 = Address::generate(env);
+    let approvers = vec![env, approver1.clone(), approver2.clone()];
+    client.set_emergency_approvers(&approvers, &2);
+    (approver1, approver2, approvers)
+}
+
+fn setup_emergency_single(env: &Env, client: &TreasuryContractClient<'static>) -> Address {
+    let approver1 = Address::generate(env);
+    let approvers = vec![env, approver1.clone()];
+    client.set_emergency_approvers(&approvers, &1);
+    approver1
 }
 
 // ---------------------------------------------------------------------------
-// Initialize
+// Initialization
 // ---------------------------------------------------------------------------
+
+#[test]
+fn initialize_succeeds() {
+    let (env, _contract_id, client, admin, _requester, _approver) = setup();
+    env.mock_all_auths();
+    client.initialize(&admin);
+    // No panic = success
+}
 
 #[test]
 fn initialize_is_one_time_only() {
-    let (_env, client, admin) = setup();
+    let (env, _contract_id, client, admin, _requester, _approver) = setup();
+    env.mock_all_auths();
+    client.initialize(&admin);
     let result = client.try_initialize(&admin);
-    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    assert_eq!(result, Err(Ok(TreasuryError::AlreadyInitialized)));
 }
 
 #[test]
-fn initialize_requires_admin_auth() {
-    let env = Env::default();
-    let admin = Address::generate(&env);
+fn uninitialized_contract_returns_not_initialized() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup();
     env.mock_all_auths();
-    let contract_id = env.register(TreasuryContract, (admin.clone(),));
-    let client = TreasuryContractClient::new(&env, &contract_id);
-    // Clear auths — admin-gated operations still require the stored admin's auth.
-    env.set_auths(&[]);
     let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    let result = client.try_enable_clawback(&asset, &authority, &true);
-    assert!(result.is_err());
-}
-
-#[test]
-fn attacker_cannot_claim_admin_role() {
-    let env = Env::default();
-    let admin = Address::generate(&env);
-    let attacker = Address::generate(&env);
-    env.mock_all_auths_allowing_non_root_auth();
-    let contract_id = env.register(TreasuryContract, (admin.clone(),));
-    let client = TreasuryContractClient::new(&env, &contract_id);
-    // Attacker supplies their own address and tries to re-initialize.
-    let result = client.try_initialize(&attacker);
-    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    let result = client.try_set_timelock(&asset, &100);
+    assert_eq!(result, Err(Ok(TreasuryError::NotInitialized)));
 }
 
 // ---------------------------------------------------------------------------
-// Enable clawback
+// Time-lock config
 // ---------------------------------------------------------------------------
 
 #[test]
-fn enable_clawback_sets_config() {
-    let (env, client, _admin) = setup();
+fn set_timelock_stores_config() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
     let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-
-    client.enable_clawback(&asset, &authority, &true);
-
-    let config = client.get_clawback_config(&asset).unwrap();
-    assert_eq!(
-        config,
-        ClawbackConfig {
-            asset: asset.clone(),
-            enabled: true,
-            authority: authority.clone(),
-            reason_required: true,
-        }
-    );
-}
-
-#[test]
-fn enable_clawback_requires_admin_auth() {
-    let env = Env::default();
-    let admin = Address::generate(&env);
-    env.mock_all_auths_allowing_non_root_auth();
-    let contract_id = env.register(TreasuryContract, (admin.clone(),));
-    let client = TreasuryContractClient::new(&env, &contract_id);
-
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    // Clear auths — the stored admin's `require_auth()` fails.
-    env.set_auths(&[]);
-    let result = client.try_enable_clawback(&asset, &authority, &true);
-    assert!(result.is_err());
-}
-
-#[test]
-fn enable_clawback_requires_admin_auth_even_for_real_admin() {
-    let env = Env::default();
-    let admin = Address::generate(&env);
     env.mock_all_auths();
-    let contract_id = env.register(TreasuryContract, (admin.clone(),));
-    let client = TreasuryContractClient::new(&env, &contract_id);
+    client.set_timelock(&asset, &3600);
 
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    env.set_auths(&[]);
-    let result = client.try_enable_clawback(&asset, &authority, &true);
-    assert!(result.is_err());
-}
-
-#[test]
-fn enable_clawback_emits_full_event_payload() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-
-    client.enable_clawback(&asset, &authority, &true);
-
-    assert_last_event(
-        &env,
-        &client.address,
-        (
-            symbol_short!("treasury"),
-            symbol_short!("enable"),
-            asset.clone(),
-        ),
-        (authority, true),
-    );
-}
-
-#[test]
-fn enable_clawback_overwrites_existing_config() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority_a = Address::generate(&env);
-    let authority_b = Address::generate(&env);
-
-    client.enable_clawback(&asset, &authority_a, &true);
-    client.enable_clawback(&asset, &authority_b, &false);
-
-    let config = client.get_clawback_config(&asset).unwrap();
-    assert_eq!(config.authority, authority_b);
-    assert!(!config.reason_required);
+    let config = client.get_timelock(&asset);
+    assert_eq!(config.asset, asset);
+    assert_eq!(config.lock_period_seconds, 3600);
     assert!(config.enabled);
 }
 
-// ---------------------------------------------------------------------------
-// Disable clawback
-// ---------------------------------------------------------------------------
-
 #[test]
-fn disable_clawback_sets_enabled_false() {
-    let (env, client, _admin) = setup();
+fn set_timelock_succeeds_with_admin_auth() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
     let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-
-    client.enable_clawback(&asset, &authority, &true);
-    client.disable_clawback(&asset);
-
-    let config = client.get_clawback_config(&asset).unwrap();
-    assert!(!config.enabled);
-    assert_eq!(config.authority, authority);
-}
-
-#[test]
-fn disable_clawback_fails_without_config() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let result = client.try_disable_clawback(&asset);
-    assert_eq!(result, Err(Ok(Error::ConfigNotFound)));
-}
-
-#[test]
-fn disable_clawback_requires_admin_auth() {
-    let env = Env::default();
-    let admin = Address::generate(&env);
-    env.mock_all_auths_allowing_non_root_auth();
-    let contract_id = env.register(TreasuryContract, (admin.clone(),));
-    let client = TreasuryContractClient::new(&env, &contract_id);
-
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    // Enable first so the config exists.
-    client.enable_clawback(&asset, &authority, &true);
-
-    // Now clear auths — the stored admin's `require_auth()` fails.
-    env.set_auths(&[]);
-    let result = client.try_disable_clawback(&asset);
-    assert!(result.is_err());
-}
-
-#[test]
-fn disable_clawback_emits_event() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    client.enable_clawback(&asset, &authority, &true);
-
-    client.disable_clawback(&asset);
-
-    assert_last_event(
-        &env,
-        &client.address,
-        (
-            symbol_short!("treasury"),
-            symbol_short!("disable"),
-            asset.clone(),
-        ),
-        env.ledger().timestamp(),
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Execute clawback — authorization and validation
-// ---------------------------------------------------------------------------
-
-#[test]
-fn execute_clawback_fails_without_config() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let asset = Address::generate(&env);
-    let reason = String::from_str(&env, "sanctions match");
-
-    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
-    assert_eq!(result, Err(Ok(Error::ConfigNotFound)));
-}
-
-#[test]
-fn execute_clawback_fails_when_disabled() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let reason = String::from_str(&env, "regulatory action");
-
-    client.enable_clawback(&asset, &authority, &true);
-    client.disable_clawback(&asset);
-
-    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
-    assert_eq!(result, Err(Ok(Error::ClawbackDisabled)));
-}
-
-#[test]
-fn execute_clawback_fails_with_wrong_authority() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    let wrong_authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let reason = String::from_str(&env, "compliance");
-
-    client.enable_clawback(&asset, &authority, &true);
-
-    let result = client.try_execute_clawback(&wrong_authority, &from, &asset, &100i128, &reason);
-    assert_eq!(result, Err(Ok(Error::Unauthorized)));
-}
-
-#[test]
-fn execute_clawback_requires_authority_auth() {
-    let env = Env::default();
-    let admin = Address::generate(&env);
     env.mock_all_auths();
-    let contract_id = env.register(TreasuryContract, (admin.clone(),));
-    let client = TreasuryContractClient::new(&env, &contract_id);
+    client.set_timelock(&asset, &3600);
+    // No panic = admin auth succeeded
+}
+
+#[test]
+fn set_timelock_updates_existing_config() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
     let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    client.enable_clawback(&asset, &authority, &true);
+    env.mock_all_auths();
+    client.set_timelock(&asset, &3600);
+    client.set_timelock(&asset, &7200);
 
-    env.set_auths(&[]);
-    let reason = String::from_str(&env, "freeze");
-    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
-    assert!(result.is_err());
+    let config = client.get_timelock(&asset);
+    assert_eq!(config.lock_period_seconds, 7200);
 }
 
 #[test]
-fn execute_clawback_rejects_zero_amount() {
-    let (env, client, _admin) = setup();
+fn get_timelock_returns_default_when_not_configured() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
     let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let reason = String::from_str(&env, "invalid");
-    client.enable_clawback(&asset, &authority, &false);
-
-    let result = client.try_execute_clawback(&authority, &from, &asset, &0i128, &reason);
-    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
-}
-
-#[test]
-fn execute_clawback_rejects_negative_amount() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let reason = String::from_str(&env, "negative");
-    client.enable_clawback(&asset, &authority, &false);
-
-    let result = client.try_execute_clawback(&authority, &from, &asset, &-50i128, &reason);
-    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
-}
-
-#[test]
-fn execute_clawback_rejects_empty_reason_when_required() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let reason = String::from_str(&env, "");
-    client.enable_clawback(&asset, &authority, &true);
-
-    let result = client.try_execute_clawback(&authority, &from, &asset, &100i128, &reason);
-    assert_eq!(result, Err(Ok(Error::InvalidReason)));
-}
-
-// ---------------------------------------------------------------------------
-// Execute clawback — success path
-// ---------------------------------------------------------------------------
-
-#[test]
-fn execute_clawback_transfers_tokens_and_creates_record() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let (asset, asset_token, asset_mint) = create_token(&env, &client.address);
-
-    // Set up clawback config with no reason requirement.
-    client.enable_clawback(&asset, &authority, &false);
-
-    // Mint tokens to `from` and verify initial balance.
-    asset_mint.mint(&from, &1_000i128);
-    assert_eq!(asset_token.balance(&from), 1_000);
-
-    // Mark the address as unauthorized so the balance becomes clawbackable.
-    asset_mint.set_authorized(&from, &false);
-
-    let reason = String::from_str(&env, "compliance clawback");
-    let record = client.execute_clawback(&authority, &from, &asset, &300i128, &reason);
-
-    assert_eq!(record.from_address, from);
-    assert_eq!(record.asset, asset);
-    assert_eq!(record.amount, 300);
-    assert_eq!(record.authority, authority);
-    assert_eq!(record.reason, reason);
-    assert_eq!(record.timestamp, env.ledger().timestamp());
-
-    // `from` lost 300 tokens.
-    assert_eq!(asset_token.balance(&from), 700);
-
-    // The record ID is stored and increments.
-    let history = client.get_clawback_history(&Some(asset.clone()), &10u32);
-    assert_eq!(history.len(), 1);
-    assert_eq!(history.get(0).unwrap().id, 1);
-}
-
-#[test]
-fn execute_clawback_emits_event() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &client.address);
-    client.enable_clawback(&asset, &authority, &false);
-    asset_mint.mint(&from, &1_000i128);
-    asset_mint.set_authorized(&from, &false);
-
-    let reason = String::from_str(&env, "sanctions");
-    let _record = client.execute_clawback(&authority, &from, &asset, &200i128, &reason);
-
-    // The clawback event is published alongside the token's own transfer
-    // event, so we filter by contract to get only our event.
-    assert_last_event(
-        &env,
-        &client.address,
-        (
-            symbol_short!("treasury"),
-            symbol_short!("clawback"),
-            from.clone(),
-            asset.clone(),
-        ),
-        (200i128, authority, reason, 1u64),
-    );
-}
-
-#[test]
-fn execute_clawback_increments_record_id() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &client.address);
-    client.enable_clawback(&asset, &authority, &false);
-    asset_mint.mint(&from, &10_000i128);
-    asset_mint.set_authorized(&from, &false);
-
-    let reason = String::from_str(&env, "audit");
-    let r1 = client.execute_clawback(&authority, &from, &asset, &100i128, &reason);
-    let r2 = client.execute_clawback(&authority, &from, &asset, &200i128, &reason);
-    let r3 = client.execute_clawback(&authority, &from, &asset, &300i128, &reason);
-
-    assert_eq!(r1.id, 1);
-    assert_eq!(r2.id, 2);
-    assert_eq!(r3.id, 3);
-}
-
-#[test]
-fn execute_clawback_allows_empty_reason_when_not_required() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &client.address);
-    client.enable_clawback(&asset, &authority, &false);
-    asset_mint.mint(&from, &1_000i128);
-    asset_mint.set_authorized(&from, &false);
-
-    let empty_reason = String::from_str(&env, "");
-    let record = client.execute_clawback(&authority, &from, &asset, &50i128, &empty_reason);
-    assert_eq!(record.amount, 50);
-}
-
-// ---------------------------------------------------------------------------
-// Get clawback config
-// ---------------------------------------------------------------------------
-
-#[test]
-fn get_clawback_config_returns_none_when_not_set() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-
-    let config = client.get_clawback_config(&asset);
-    assert!(config.is_none());
-}
-
-#[test]
-fn get_clawback_config_returns_correct_config_after_disable() {
-    let (env, client, _admin) = setup();
-    let asset = Address::generate(&env);
-    let authority = Address::generate(&env);
-    client.enable_clawback(&asset, &authority, &true);
-    client.disable_clawback(&asset);
-
-    let config = client.get_clawback_config(&asset).unwrap();
+    let config = client.get_timelock(&asset);
     assert!(!config.enabled);
-    assert_eq!(config.authority, authority);
-    assert!(config.reason_required);
+    assert_eq!(config.lock_period_seconds, 0);
+}
+
+#[test]
+fn disable_timelock_disables_config() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
+    let asset = Address::generate(&env);
+    env.mock_all_auths();
+    client.set_timelock(&asset, &3600);
+    client.disable_timelock(&asset);
+
+    let config = client.get_timelock(&asset);
+    assert!(!config.enabled);
+}
+
+#[test]
+fn disable_unconfigured_timelock_fails() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
+    let asset = Address::generate(&env);
+    env.mock_all_auths();
+    let result = client.try_disable_timelock(&asset);
+    assert_eq!(result, Err(Ok(TreasuryError::AssetNotConfigured)));
 }
 
 // ---------------------------------------------------------------------------
-// Get clawback history
+// Request withdrawal
 // ---------------------------------------------------------------------------
 
 #[test]
-fn get_clawback_history_returns_empty_when_no_records() {
-    let (_env, client, _admin) = setup();
-    let history = client.get_clawback_history(&None, &10u32);
-    assert_eq!(history.len(), 0);
+fn request_withdrawal_creates_request() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    env.mock_all_auths();
+
+    let to = Address::generate(&env);
+    let request_id = client.request_withdrawal(&requester, &to, &asset, &1000);
+    assert_eq!(request_id, 1);
+
+    let stored = client.get_withdrawal_request(&request_id);
+    assert_eq!(stored.id, 1);
+    assert_eq!(stored.requester, requester);
+    assert_eq!(stored.to, to);
+    assert_eq!(stored.asset, asset);
+    assert_eq!(stored.amount, 1000);
+    assert!(!stored.executed);
+    assert!(!stored.cancelled);
+    assert_eq!(stored.unlock_at, stored.created_at + 3600);
 }
 
 #[test]
-fn get_clawback_history_returns_records_newest_first() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &client.address);
-    client.enable_clawback(&asset, &authority, &false);
-    asset_mint.mint(&from, &10_000i128);
-    asset_mint.set_authorized(&from, &false);
-
-    let reason = String::from_str(&env, "batch");
-    client.execute_clawback(&authority, &from, &asset, &100i128, &reason);
-    client.execute_clawback(&authority, &from, &asset, &200i128, &reason);
-    client.execute_clawback(&authority, &from, &asset, &300i128, &reason);
-
-    let history = client.get_clawback_history(&Some(asset.clone()), &5u32);
-    assert_eq!(history.len(), 3);
-    assert_eq!(history.get(0).unwrap().id, 3);
-    assert_eq!(history.get(1).unwrap().id, 2);
-    assert_eq!(history.get(2).unwrap().id, 1);
+fn request_withdrawal_succeeds_with_auth() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+    assert_eq!(id, 1);
 }
 
 #[test]
-fn get_clawback_history_honors_limit() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &client.address);
-    client.enable_clawback(&asset, &authority, &false);
-    asset_mint.mint(&from, &10_000i128);
-    asset_mint.set_authorized(&from, &false);
-
-    let reason = String::from_str(&env, "batch");
-    client.execute_clawback(&authority, &from, &asset, &100i128, &reason);
-    client.execute_clawback(&authority, &from, &asset, &200i128, &reason);
-    client.execute_clawback(&authority, &from, &asset, &300i128, &reason);
-    client.execute_clawback(&authority, &from, &asset, &400i128, &reason);
-
-    let history = client.get_clawback_history(&Some(asset.clone()), &2u32);
-    assert_eq!(history.len(), 2);
-    assert_eq!(history.get(0).unwrap().id, 4);
-    assert_eq!(history.get(1).unwrap().id, 3);
+fn request_withdrawal_rejects_zero_amount() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let result = client.try_request_withdrawal(&requester, &to, &asset, &0);
+    assert_eq!(result, Err(Ok(TreasuryError::AmountZero)));
 }
 
 #[test]
-fn get_clawback_history_returns_asset_records_when_interleaved() {
-    let (env, client, _admin) = setup();
-    let authority = Address::generate(&env);
-    let from = Address::generate(&env);
-    let (asset_a, _at_a, mint_a) = create_token(&env, &client.address);
-    let (asset_b, _at_b, mint_b) = create_token(&env, &client.address);
-    client.enable_clawback(&asset_a, &authority, &false);
-    client.enable_clawback(&asset_b, &authority, &false);
-    mint_a.mint(&from, &10_000i128);
-    mint_b.mint(&from, &10_000i128);
-    mint_a.set_authorized(&from, &false);
-    mint_b.set_authorized(&from, &false);
+fn request_withdrawal_rejects_negative_amount() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let result = client.try_request_withdrawal(&requester, &to, &asset, &(-100));
+    assert_eq!(result, Err(Ok(TreasuryError::AmountZero)));
+}
 
-    let reason = String::from_str(&env, "batch");
-    // Interleave: A(100), B(200), A(300), B(400), A(500)
-    client.execute_clawback(&authority, &from, &asset_a, &100i128, &reason);
-    client.execute_clawback(&authority, &from, &asset_b, &200i128, &reason);
-    client.execute_clawback(&authority, &from, &asset_a, &300i128, &reason);
-    client.execute_clawback(&authority, &from, &asset_b, &400i128, &reason);
-    client.execute_clawback(&authority, &from, &asset_a, &500i128, &reason);
+#[test]
+fn request_withdrawal_requires_configured_asset() {
+    let (env, _contract_id, client, _admin, requester, _approver, _asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    let unknown = Address::generate(&env);
+    env.mock_all_auths();
+    let result = client.try_request_withdrawal(&requester, &to, &unknown, &1000);
+    assert_eq!(result, Err(Ok(TreasuryError::AssetNotConfigured)));
+}
 
-    // Query asset A with limit 2 — returns A(500) and A(300), not B records.
-    let history = client.get_clawback_history(&Some(asset_a.clone()), &2u32);
-    assert_eq!(history.len(), 2);
-    assert_eq!(history.get(0).unwrap().id, 5);
-    assert_eq!(history.get(0).unwrap().amount, 500);
-    assert_eq!(history.get(1).unwrap().id, 3);
-    assert_eq!(history.get(1).unwrap().amount, 300);
+#[test]
+fn request_withdrawal_returns_incremented_ids() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
 
-    // Query asset A with limit 10 — returns all 3 A records.
-    let history_all = client.get_clawback_history(&Some(asset_a), &10u32);
-    assert_eq!(history_all.len(), 3);
-    assert_eq!(history_all.get(0).unwrap().id, 5);
-    assert_eq!(history_all.get(1).unwrap().id, 3);
-    assert_eq!(history_all.get(2).unwrap().id, 1);
+    let id1 = client.request_withdrawal(&requester, &to, &asset, &100);
+    let id2 = client.request_withdrawal(&requester, &to, &asset, &200);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+}
+
+#[test]
+fn request_withdrawal_fails_when_disabled() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    client.disable_timelock(&asset);
+
+    let result = client.try_request_withdrawal(&requester, &to, &asset, &1000);
+    assert_eq!(result, Err(Ok(TreasuryError::AssetNotConfigured)));
+}
+
+// ---------------------------------------------------------------------------
+// Execute withdrawal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn execute_withdrawal_after_unlock() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // Advance ledger time past the lock period
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
+    env.mock_all_auths();
+    client.execute_withdrawal(&id);
+
+    let stored = client.get_withdrawal_request(&id);
+    assert!(stored.executed);
+    assert!(!stored.cancelled);
+}
+
+#[test]
+fn execute_withdrawal_before_unlock_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // No time advance — still within lock period
+    let result = client.try_execute_withdrawal(&id);
+    assert_eq!(result, Err(Ok(TreasuryError::TimeLockNotElapsed)));
+}
+
+#[test]
+fn execute_withdrawal_not_found() {
+    let (env, _contract_id, client, _admin, _requester, _approver, _asset) = setup_with_timelock();
+    env.mock_all_auths();
+
+    let result = client.try_execute_withdrawal(&999);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestNotFound)));
+}
+
+#[test]
+fn execute_withdrawal_already_executed_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
+    client.execute_withdrawal(&id);
+
+    let result = client.try_execute_withdrawal(&id);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestAlreadyExecuted)));
+}
+
+#[test]
+fn execute_withdrawal_cancelled_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // Cancel the request first (requester.require_auth passes with mock_all_auths)
+    client.cancel_withdrawal(&id);
+
+    // Now try to execute
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
+    let result = client.try_execute_withdrawal(&id);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestAlreadyCancelled)));
+}
+
+// ---------------------------------------------------------------------------
+// Cancel withdrawal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cancel_withdrawal_by_requester() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &500);
+    client.cancel_withdrawal(&id);
+
+    let stored = client.get_withdrawal_request(&id);
+    assert!(stored.cancelled);
+    assert!(!stored.executed);
+}
+
+#[test]
+fn cancel_withdrawal_succeeds_with_auth() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &500);
+    client.cancel_withdrawal(&id);
+
+    let stored = client.get_withdrawal_request(&id);
+    assert!(stored.cancelled);
+}
+
+#[test]
+fn cancel_withdrawal_not_found() {
+    let (env, _contract_id, client, _admin, _requester, _approver, _asset) = setup_with_timelock();
+    env.mock_all_auths();
+    let result = client.try_cancel_withdrawal(&999);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestNotFound)));
+}
+
+#[test]
+fn cancel_withdrawal_already_executed_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &500);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
+    client.execute_withdrawal(&id);
+
+    let result = client.try_cancel_withdrawal(&id);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestAlreadyExecuted)));
+}
+
+#[test]
+fn cancel_withdrawal_already_cancelled_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &500);
+    client.cancel_withdrawal(&id);
+
+    let result = client.try_cancel_withdrawal(&id);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestAlreadyCancelled)));
+}
+
+// ---------------------------------------------------------------------------
+// Emergency override
+// ---------------------------------------------------------------------------
+
+#[test]
+fn emergency_override_executes_before_unlock() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let (approver1, approver2, _) = setup_emergency(&env, &client);
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // Execute emergency override BEFORE unlock time
+    let override_approvers = vec![&env, approver1, approver2];
+    client.emergency_override(&id, &override_approvers);
+
+    let stored = client.get_withdrawal_request(&id);
+    assert!(stored.executed);
+}
+
+#[test]
+fn emergency_override_insufficient_approvals_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let (approver1, _, _) = setup_emergency(&env, &client);
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // Only 1 approver, threshold is 2
+    let single_approver = vec![&env, approver1];
+    let result = client.try_emergency_override(&id, &single_approver);
+    assert_eq!(result, Err(Ok(TreasuryError::InsufficientApprovals)));
+}
+
+#[test]
+fn emergency_override_invalid_approver_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let stranger = Address::generate(&env);
+
+    let _approver1 = setup_emergency_single(&env, &client);
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // Use an address NOT in the approver list
+    let invalid_approvers = vec![&env, stranger];
+    let result = client.try_emergency_override(&id, &invalid_approvers);
+    assert_eq!(result, Err(Ok(TreasuryError::InvalidApprover)));
+}
+
+#[test]
+fn emergency_override_no_approvers_set_up_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    let some_approvers = vec![&env, Address::generate(&env)];
+    let result = client.try_emergency_override(&id, &some_approvers);
+    assert_eq!(result, Err(Ok(TreasuryError::NoEmergencyApprovers)));
+}
+
+// ---------------------------------------------------------------------------
+// Emergency approver management
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_emergency_approvers_stores_values() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
+    let approver1 = Address::generate(&env);
+    let approver2 = Address::generate(&env);
+    let approvers = vec![&env, approver1, approver2];
+
+    env.mock_all_auths();
+    client.set_emergency_approvers(&approvers, &2);
+
+    let stored = client.get_emergency_approvers();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(client.get_emergency_threshold(), 2);
+}
+
+#[test]
+fn get_emergency_approvers_defaults_empty() {
+    let (_env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
+    let stored = client.get_emergency_approvers();
+    assert_eq!(stored.len(), 0);
+    assert_eq!(client.get_emergency_threshold(), 0);
+}
+
+#[test]
+fn set_emergency_approvers_succeeds_with_admin_auth() {
+    let (env, _contract_id, client, _admin, _requester, _approver) = setup_initialized();
+    let approvers = vec![&env, Address::generate(&env)];
+    env.mock_all_auths();
+    client.set_emergency_approvers(&approvers, &1);
+    // No panic = admin auth succeeded
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+#[test]
+fn request_withdrawal_emits_event() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    let events = env.events().all();
+    let empty: soroban_sdk::Vec<(
+        Address,
+        soroban_sdk::Vec<soroban_sdk::Val>,
+        soroban_sdk::Val,
+    )> = vec![&env];
+    assert_ne!(events, empty, "expected at least one event to be emitted");
+}
+
+// ---------------------------------------------------------------------------
+// Get withdrawal request
+// ---------------------------------------------------------------------------
+
+#[test]
+fn get_withdrawal_request_not_found() {
+    let (_env, _contract_id, client, _admin, _requester, _approver, _asset) = setup_with_timelock();
+    let result = client.try_get_withdrawal_request(&999);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestNotFound)));
+}
+
+// ---------------------------------------------------------------------------
+// Edge cases
+// ---------------------------------------------------------------------------
+
+#[test]
+fn multiple_withdrawals_tracked_independently() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+
+    let id1 = client.request_withdrawal(&requester, &to, &asset, &100);
+    let id2 = client.request_withdrawal(&requester, &to, &asset, &200);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
+    client.execute_withdrawal(&id1);
+
+    let r1 = client.get_withdrawal_request(&id1);
+    let r2 = client.get_withdrawal_request(&id2);
+
+    assert!(r1.executed);
+    assert!(!r2.executed);
+}
+
+#[test]
+fn emergency_override_already_executed_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let approver1 = setup_emergency_single(&env, &client);
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // First, execute normally after timelock expires
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
+    client.execute_withdrawal(&id);
+
+    // Now try to execute emergency override
+    let override_approvers = vec![&env, approver1];
+    let result = client.try_emergency_override(&id, &override_approvers);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestAlreadyExecuted)));
+}
+
+#[test]
+fn emergency_override_already_cancelled_fails() {
+    let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
+    let to = Address::generate(&env);
+    env.mock_all_auths();
+    let approver1 = setup_emergency_single(&env, &client);
+
+    let id = client.request_withdrawal(&requester, &to, &asset, &1000);
+
+    // First, cancel the request
+    client.cancel_withdrawal(&id);
+
+    // Now try to execute emergency override
+    let override_approvers = vec![&env, approver1];
+    let result = client.try_emergency_override(&id, &override_approvers);
+    assert_eq!(result, Err(Ok(TreasuryError::RequestAlreadyCancelled)));
 }

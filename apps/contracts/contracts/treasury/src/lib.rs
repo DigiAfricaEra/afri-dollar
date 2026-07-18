@@ -1,139 +1,82 @@
 #![no_std]
-//! Treasury — clawback contract for AfriDollar.
-//!
-//! Provides regulatory-compliant clawback of compliant assets. The contract
-//! admin configures clawback per asset — enabling it, setting an authority
-//! address (typically a regulatory or platform admin), and optionally
-//! requiring a reason string. The authority can then execute clawbacks that
-//! return tokens from a specified address to the token issuer.
-//!
-//! Every clawback is recorded with a unique ID, the reason, and a timestamp
-//! so the full history is available for audit. All state changes emit events.
 
-use afri_contract_shared::{
-    extend_instance_ttl, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
-};
+use afri_contract_shared::extend_instance_ttl;
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, token::StellarAssetClient,
-    Address, Env, String, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, Address, Env,
+    Symbol, Vec,
 };
 
-/// Errors returned by the treasury clawback contract.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeLockConfig {
+    pub asset: Address,
+    pub lock_period_seconds: u64,
+    pub enabled: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalRequest {
+    pub id: u64,
+    pub requester: Address,
+    pub to: Address,
+    pub asset: Address,
+    pub amount: i128,
+    pub created_at: u64,
+    pub unlock_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+
+#[contracttype]
+enum DataKey {
+    Admin,
+    TimeLockConfig(Address),
+    WithdrawalRequest(u64),
+    NextRequestId,
+    EmergencyApprovers,
+    EmergencyThreshold,
+}
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
-pub enum Error {
-    /// `initialize` was called on a contract that already has an admin.
+pub enum TreasuryError {
     AlreadyInitialized = 1,
-    /// An operation was attempted before the contract was initialized.
     NotInitialized = 2,
-    /// The caller is not authorized to perform the operation.
     Unauthorized = 3,
-    /// No `ClawbackConfig` exists for the given asset.
-    ConfigNotFound = 4,
-    /// Clawback is not enabled for the given asset.
-    ClawbackDisabled = 5,
-    /// The amount provided is zero or negative.
-    InvalidAmount = 6,
-    /// A reason is required for this asset but none was provided.
-    InvalidReason = 7,
-    /// A checked arithmetic operation would have overflowed.
-    Overflow = 8,
+    LockPeriodTooLarge = 4,
+    AmountZero = 5,
+    RequestNotFound = 6,
+    RequestAlreadyExecuted = 7,
+    RequestAlreadyCancelled = 8,
+    TimeLockNotElapsed = 9,
+    NotRequesterOrAdmin = 10,
+    InvalidApprover = 11,
+    InsufficientApprovals = 12,
+    AssetNotConfigured = 13,
+    NoEmergencyApprovers = 14,
 }
 
-/// Configuration for clawback on a specific asset.
-#[contracttype]
+#[contractevent(topics = ["timelock_config"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClawbackConfig {
+pub struct TimelockConfigEvent {
+    #[topic]
+    pub action: Symbol,
     pub asset: Address,
+    pub lock_period_seconds: u64,
     pub enabled: bool,
-    pub authority: Address,
-    pub reason_required: bool,
 }
 
-/// A recorded clawback execution, stored for audit trail.
-#[contracttype]
+#[contractevent(topics = ["withdrawal"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClawbackRecord {
-    pub id: u64,
-    pub from_address: Address,
+pub struct WithdrawalEvent {
+    #[topic]
+    pub action: Symbol,
+    pub request_id: u64,
     pub asset: Address,
     pub amount: i128,
-    pub authority: Address,
-    pub reason: String,
-    pub timestamp: u64,
-}
-
-/// Instance and persistent storage keys.
-#[contracttype]
-#[derive(Clone)]
-enum DataKey {
-    /// The address allowed to perform privileged operations.
-    Admin,
-    /// `ClawbackConfig`, keyed by `asset`.
-    ClawbackConfig(Address),
-    /// Monotonic counter for the next clawback record ID.
-    NextRecordId,
-    /// `ClawbackRecord`, keyed by `id`.
-    ClawbackRecord(u64),
-    /// Per-asset counter for the number of clawback records.
-    AssetRecordCounter(Address),
-    /// Per-asset mapping from local index to global record ID.
-    AssetRecordId(Address, u64),
-}
-
-/// Emitted when clawback is enabled for an asset.
-#[contractevent(topics = ["treasury", "enable"], data_format = "vec")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClawbackEnabled {
-    #[topic]
-    pub asset: Address,
-    pub authority: Address,
-    pub reason_required: bool,
-}
-
-/// Emitted when clawback is disabled for an asset.
-#[contractevent(topics = ["treasury", "disable"], data_format = "single-value")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClawbackDisabled {
-    #[topic]
-    pub asset: Address,
-    pub disabled_at: u64,
-}
-
-/// Emitted when a clawback is executed.
-#[contractevent(topics = ["treasury", "clawback"], data_format = "vec")]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClawbackExecuted {
-    #[topic]
-    pub from: Address,
-    #[topic]
-    pub asset: Address,
-    pub amount: i128,
-    pub authority: Address,
-    pub reason: String,
-    pub record_id: u64,
-}
-
-/// Extend the TTL of a persistent storage entry, using the same bump amounts
-/// as `extend_instance_ttl`. Without this, a long-idle config or record could
-/// expire while the contract's instance data stays alive.
-fn extend_persistent_ttl(env: &Env, key: &DataKey) {
-    env.storage()
-        .persistent()
-        .extend_ttl(key, INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-}
-
-/// Read the stored admin and require its authorization. Shared by every
-/// admin-gated entrypoint.
-fn require_admin(env: &Env) -> Result<(), Error> {
-    let admin: Address = env
-        .storage()
-        .instance()
-        .get(&DataKey::Admin)
-        .ok_or(Error::NotInitialized)?;
-    admin.require_auth();
-    Ok(())
+    pub to: Address,
 }
 
 #[contract]
@@ -141,267 +84,355 @@ pub struct TreasuryContract;
 
 #[contractimpl]
 impl TreasuryContract {
-    /// Constructor called atomically during `env.register()`. Sets `admin`
-    /// and the initial record counter. Prevents front-running because
-    /// deployment and initialization are one atomic operation.
-    pub fn __constructor(env: Env, admin: Address) {
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::NextRecordId, &1u64);
-        extend_instance_ttl(&env);
-    }
-
-    /// Initialize the contract, recording `admin`.
-    /// Requires the caller to authenticate as `admin`. Should be called
-    /// atomically during deployment (same transaction) to prevent
-    /// front-running. Prefer using the `__constructor` for new deployments.
-    /// Fails with `Error::AlreadyInitialized` if called twice.
-    pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), TreasuryError> {
         if env.storage().instance().has(&DataKey::Admin) {
-            return Err(Error::AlreadyInitialized);
+            return Err(TreasuryError::AlreadyInitialized);
         }
-        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::NextRecordId, &1u64);
         extend_instance_ttl(&env);
         Ok(())
     }
 
-    /// Admin-only. Enable clawback for `asset`, setting `authority` as the
-    /// address authorized to execute clawbacks, and optionally requiring a
-    /// reason string via `reason_required`. If a config already exists for
-    /// this asset, it is overwritten.
-    pub fn enable_clawback(
+    pub fn set_timelock(
         env: Env,
         asset: Address,
-        authority: Address,
-        reason_required: bool,
-    ) -> Result<(), Error> {
-        require_admin(&env)?;
+        lock_period_seconds: u64,
+    ) -> Result<(), TreasuryError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
+        admin.require_auth();
 
-        let config = ClawbackConfig {
+        let config = TimeLockConfig {
             asset: asset.clone(),
+            lock_period_seconds,
             enabled: true,
-            authority: authority.clone(),
-            reason_required,
         };
         env.storage()
-            .persistent()
-            .set(&DataKey::ClawbackConfig(asset.clone()), &config);
-        extend_persistent_ttl(&env, &DataKey::ClawbackConfig(asset.clone()));
+            .instance()
+            .set(&DataKey::TimeLockConfig(asset.clone()), &config);
         extend_instance_ttl(&env);
 
-        ClawbackEnabled {
+        TimelockConfigEvent {
+            action: symbol_short!("set"),
             asset,
-            authority,
-            reason_required,
+            lock_period_seconds,
+            enabled: true,
         }
         .publish(&env);
+
         Ok(())
     }
 
-    /// Admin-only. Disable clawback for `asset`. The stored config is kept
-    /// but marked disabled, so re-enabling is possible without re-setting
-    /// the authority.
-    pub fn disable_clawback(env: Env, asset: Address) -> Result<(), Error> {
-        require_admin(&env)?;
-
-        let mut config: ClawbackConfig = env
+    pub fn disable_timelock(env: Env, asset: Address) -> Result<(), TreasuryError> {
+        let admin: Address = env
             .storage()
-            .persistent()
-            .get(&DataKey::ClawbackConfig(asset.clone()))
-            .ok_or(Error::ConfigNotFound)?;
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
+        admin.require_auth();
+
+        let mut config: TimeLockConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::TimeLockConfig(asset.clone()))
+            .ok_or(TreasuryError::AssetNotConfigured)?;
         config.enabled = false;
+
         env.storage()
-            .persistent()
-            .set(&DataKey::ClawbackConfig(asset.clone()), &config);
-        extend_persistent_ttl(&env, &DataKey::ClawbackConfig(asset.clone()));
+            .instance()
+            .set(&DataKey::TimeLockConfig(asset.clone()), &config);
         extend_instance_ttl(&env);
 
-        ClawbackDisabled {
+        TimelockConfigEvent {
+            action: symbol_short!("disable"),
             asset,
-            disabled_at: env.ledger().timestamp(),
+            lock_period_seconds: config.lock_period_seconds,
+            enabled: false,
         }
         .publish(&env);
+
         Ok(())
     }
 
-    /// Execute a clawback: transfer `amount` of `asset` from `from` back to
-    /// the token issuer. Only the configured `authority` for this asset may
-    /// call this. Fails with:
-    ///
-    /// * `Error::ConfigNotFound` — the asset has no clawback config.
-    /// * `Error::ClawbackDisabled` — clawback is not enabled for this asset.
-    /// * `Error::Unauthorized` — `authority` does not match the stored authority.
-    /// * `Error::InvalidAmount` — `amount` is zero or negative.
-    /// * `Error::InvalidReason` — `reason_required` is true but `reason` is empty.
-    ///
-    /// Creates a `ClawbackRecord` and emits a `ClawbackExecuted` event.
-    pub fn execute_clawback(
+    pub fn get_timelock(env: Env, asset: Address) -> TimeLockConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::TimeLockConfig(asset.clone()))
+            .unwrap_or(TimeLockConfig {
+                asset,
+                lock_period_seconds: 0,
+                enabled: false,
+            })
+    }
+
+    pub fn set_emergency_approvers(
         env: Env,
-        authority: Address,
-        from: Address,
+        approvers: Vec<Address>,
+        threshold: u32,
+    ) -> Result<(), TreasuryError> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyApprovers, &approvers);
+        env.storage()
+            .instance()
+            .set(&DataKey::EmergencyThreshold, &threshold);
+        extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    pub fn get_emergency_approvers(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyApprovers)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    pub fn get_emergency_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::EmergencyThreshold)
+            .unwrap_or(0)
+    }
+
+    pub fn request_withdrawal(
+        env: Env,
+        requester: Address,
+        to: Address,
         asset: Address,
         amount: i128,
-        reason: String,
-    ) -> Result<ClawbackRecord, Error> {
-        let config: ClawbackConfig = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ClawbackConfig(asset.clone()))
-            .ok_or(Error::ConfigNotFound)?;
+    ) -> Result<u64, TreasuryError> {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
 
-        if !config.enabled {
-            return Err(Error::ClawbackDisabled);
-        }
-        if authority != config.authority {
-            return Err(Error::Unauthorized);
-        }
-        authority.require_auth();
+        requester.require_auth();
+
         if amount <= 0 {
-            return Err(Error::InvalidAmount);
-        }
-        if config.reason_required && reason.is_empty() {
-            return Err(Error::InvalidReason);
+            return Err(TreasuryError::AmountZero);
         }
 
-        // Bump config TTL since it was accessed.
-        extend_persistent_ttl(&env, &DataKey::ClawbackConfig(asset.clone()));
-
-        let record_id: u64 = env
+        let config: TimeLockConfig = env
             .storage()
             .instance()
-            .get(&DataKey::NextRecordId)
-            .ok_or(Error::NotInitialized)?;
+            .get(&DataKey::TimeLockConfig(asset.clone()))
+            .ok_or(TreasuryError::AssetNotConfigured)?;
+        if !config.enabled {
+            return Err(TreasuryError::AssetNotConfigured);
+        }
 
         let now = env.ledger().timestamp();
+        let unlock_at = now + config.lock_period_seconds;
 
-        // Execute the token clawback — this transfers `amount` of `asset`
-        // from `from` to the token admin (issuer). The contract must be the
-        // clawback authority on the Stellar Asset Contract token.
-        StellarAssetClient::new(&env, &asset).clawback(&from, &amount);
-
-        let record = ClawbackRecord {
-            id: record_id,
-            from_address: from.clone(),
-            asset: asset.clone(),
-            amount,
-            authority: authority.clone(),
-            reason: reason.clone(),
-            timestamp: now,
-        };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey::ClawbackRecord(record_id), &record);
-        extend_persistent_ttl(&env, &DataKey::ClawbackRecord(record_id));
-
-        // Track per-asset record index for efficient filtered queries.
-        let asset_count_key = DataKey::AssetRecordCounter(asset.clone());
-        let asset_count: u64 = env
+        let mut next_id: u64 = env
             .storage()
-            .persistent()
-            .get(&asset_count_key)
-            .unwrap_or(0);
-        env.storage().persistent().set(
-            &DataKey::AssetRecordId(asset.clone(), asset_count),
-            &record_id,
-        );
-        extend_persistent_ttl(&env, &DataKey::AssetRecordId(asset.clone(), asset_count));
-        env.storage()
-            .persistent()
-            .set(&asset_count_key, &(asset_count + 1));
-        extend_persistent_ttl(&env, &asset_count_key);
-
-        let next_id = record_id.checked_add(1).ok_or(Error::Overflow)?;
+            .instance()
+            .get(&DataKey::NextRequestId)
+            .unwrap_or(1);
+        let request_id = next_id;
+        next_id += 1;
         env.storage()
             .instance()
-            .set(&DataKey::NextRecordId, &next_id);
+            .set(&DataKey::NextRequestId, &next_id);
+
+        let request = WithdrawalRequest {
+            id: request_id,
+            requester: requester.clone(),
+            to: to.clone(),
+            asset: asset.clone(),
+            amount,
+            created_at: now,
+            unlock_at,
+            executed: false,
+            cancelled: false,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalRequest(request_id), &request);
         extend_instance_ttl(&env);
 
-        ClawbackExecuted {
-            from,
+        WithdrawalEvent {
+            action: symbol_short!("request"),
+            request_id,
             asset,
             amount,
-            authority,
-            reason,
-            record_id,
+            to,
         }
         .publish(&env);
-        Ok(record)
+
+        Ok(request_id)
     }
 
-    /// Read the `ClawbackConfig` for `asset`, or `None` if no config has
-    /// been set. Bumps the config TTL so active configurations don't expire.
-    pub fn get_clawback_config(env: Env, asset: Address) -> Option<ClawbackConfig> {
-        let config: Option<ClawbackConfig> = env
+    pub fn execute_withdrawal(env: Env, request_id: u64) -> Result<(), TreasuryError> {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
+
+        let mut request: WithdrawalRequest = env
             .storage()
-            .persistent()
-            .get(&DataKey::ClawbackConfig(asset.clone()));
-        if config.is_some() {
-            extend_persistent_ttl(&env, &DataKey::ClawbackConfig(asset));
-            extend_instance_ttl(&env);
+            .instance()
+            .get(&DataKey::WithdrawalRequest(request_id))
+            .ok_or(TreasuryError::RequestNotFound)?;
+
+        if request.executed {
+            return Err(TreasuryError::RequestAlreadyExecuted);
         }
-        config
+        if request.cancelled {
+            return Err(TreasuryError::RequestAlreadyCancelled);
+        }
+
+        let now = env.ledger().timestamp();
+        if now < request.unlock_at {
+            return Err(TreasuryError::TimeLockNotElapsed);
+        }
+
+        request.executed = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalRequest(request_id), &request);
+        extend_instance_ttl(&env);
+
+        WithdrawalEvent {
+            action: symbol_short!("execute"),
+            request_id,
+            asset: request.asset.clone(),
+            amount: request.amount,
+            to: request.to.clone(),
+        }
+        .publish(&env);
+
+        Ok(())
     }
 
-    /// Return the most recent `limit` clawback records for `asset`,
-    /// ordered newest-first. Pass `None` for `asset` to fetch records for
-    /// all assets. Returns fewer records than `limit` if fewer exist.
-    pub fn get_clawback_history(
-        env: Env,
-        asset: Option<Address>,
-        limit: u32,
-    ) -> Vec<ClawbackRecord> {
-        let max_records = if limit == 0 { 0 } else { limit as u64 };
-        let mut records: Vec<ClawbackRecord> = Vec::new(&env);
+    pub fn cancel_withdrawal(env: Env, request_id: u64) -> Result<(), TreasuryError> {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
 
-        match asset {
-            None => {
-                let next_id: u64 = env
-                    .storage()
-                    .instance()
-                    .get(&DataKey::NextRecordId)
-                    .unwrap_or(1);
-                let count = (next_id - 1).min(max_records);
-                for i in 0..count {
-                    let id = next_id - 1 - i;
-                    if let Some(record) = env
-                        .storage()
-                        .persistent()
-                        .get::<DataKey, ClawbackRecord>(&DataKey::ClawbackRecord(id))
-                    {
-                        records.push_back(record);
-                    }
-                }
-            }
-            Some(ref asset_addr) => {
-                let asset_count: u64 = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::AssetRecordCounter(asset_addr.clone()))
-                    .unwrap_or(0);
-                let count = asset_count.min(max_records);
-                for i in 0..count {
-                    let idx = asset_count - 1 - i;
-                    if let Some(record_id) = env
-                        .storage()
-                        .persistent()
-                        .get::<DataKey, u64>(&DataKey::AssetRecordId(asset_addr.clone(), idx))
-                    {
-                        if let Some(record) = env
-                            .storage()
-                            .persistent()
-                            .get::<DataKey, ClawbackRecord>(&DataKey::ClawbackRecord(record_id))
-                        {
-                            records.push_back(record);
-                        }
-                    }
-                }
-            }
+        let mut request: WithdrawalRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawalRequest(request_id))
+            .ok_or(TreasuryError::RequestNotFound)?;
+
+        if request.executed {
+            return Err(TreasuryError::RequestAlreadyExecuted);
+        }
+        if request.cancelled {
+            return Err(TreasuryError::RequestAlreadyCancelled);
         }
 
-        records
+        request.requester.require_auth();
+
+        request.cancelled = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalRequest(request_id), &request);
+        extend_instance_ttl(&env);
+
+        WithdrawalEvent {
+            action: symbol_short!("cancel"),
+            request_id,
+            asset: request.asset,
+            amount: request.amount,
+            to: request.to,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn emergency_override(
+        env: Env,
+        request_id: u64,
+        approvers: Vec<Address>,
+    ) -> Result<(), TreasuryError> {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
+
+        let stored_approvers: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyApprovers)
+            .ok_or(TreasuryError::NoEmergencyApprovers)?;
+        let threshold: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EmergencyThreshold)
+            .ok_or(TreasuryError::NoEmergencyApprovers)?;
+
+        if approvers.len() < threshold {
+            return Err(TreasuryError::InsufficientApprovals);
+        }
+
+        for approver in approvers.iter() {
+            let mut is_valid = false;
+            for stored in stored_approvers.iter() {
+                if stored == approver {
+                    is_valid = true;
+                    break;
+                }
+            }
+            if !is_valid {
+                return Err(TreasuryError::InvalidApprover);
+            }
+            approver.require_auth();
+        }
+
+        let mut request: WithdrawalRequest = env
+            .storage()
+            .instance()
+            .get(&DataKey::WithdrawalRequest(request_id))
+            .ok_or(TreasuryError::RequestNotFound)?;
+
+        if request.executed {
+            return Err(TreasuryError::RequestAlreadyExecuted);
+        }
+        if request.cancelled {
+            return Err(TreasuryError::RequestAlreadyCancelled);
+        }
+
+        request.executed = true;
+        env.storage()
+            .instance()
+            .set(&DataKey::WithdrawalRequest(request_id), &request);
+        extend_instance_ttl(&env);
+
+        WithdrawalEvent {
+            action: symbol_short!("emrgncy"), // "emergency" is 9 chars, this fits
+            request_id,
+            asset: request.asset,
+            amount: request.amount,
+            to: request.to,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn get_withdrawal_request(
+        env: Env,
+        request_id: u64,
+    ) -> Result<WithdrawalRequest, TreasuryError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::WithdrawalRequest(request_id))
+            .ok_or(TreasuryError::RequestNotFound)
     }
 }
 
