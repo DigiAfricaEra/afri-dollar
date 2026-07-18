@@ -38,15 +38,24 @@ pub enum Error {
     BatchNotFound = 4,
     /// An amount argument was zero or negative.
     InvalidAmount = 5,
+    /// The batch is not in the correct state for this operation.
+    InvalidBatchState = 6,
     /// The batch has already been funded or distributed.
-    BatchAlreadyFunded = 6,
+    BatchAlreadyFunded = 7,
     /// The batch has not been funded yet.
-    BatchNotFunded = 7,
-    /// The batch has already been distributed.
-    AlreadyDistributed = 8,
+    BatchNotFunded = 8,
     /// A checked arithmetic operation would have overflowed.
     Overflow = 9,
+    /// The batch has exceeded the maximum number of recipients.
+    TooManyRecipients = 10,
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of recipients allowed in a single payroll batch.
+const MAX_RECIPIENTS: u32 = 200;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -67,9 +76,17 @@ pub struct PayrollBatch {
     pub asset: Address,
     pub recipients: Vec<Recipient>,
     pub total_amount: i128,
-    pub funded: bool,
-    pub distributed: bool,
+    pub status: BatchStatus,
     pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BatchStatus {
+    Open = 0,
+    Funded = 1,
+    Distributed = 2,
+    Cancelled = 3,
 }
 
 // ---------------------------------------------------------------------------
@@ -195,15 +212,15 @@ impl PayrollContract {
 
     /// Create a new empty payroll batch for `asset`.
     /// Returns the new batch ID.
-    pub fn create_batch(env: Env, creator: Address, asset: Address) -> u64 {
+    pub fn create_batch(env: Env, creator: Address, asset: Address) -> Result<u64, Error> {
         creator.require_auth();
 
         let id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextBatchId)
-            .unwrap_or(1);
-        let next_id = id.checked_add(1).ok_or(Error::Overflow).unwrap();
+            .ok_or(Error::NotInitialized)?;
+        let next_id = id.checked_add(1).ok_or(Error::Overflow)?;
 
         let batch = PayrollBatch {
             id,
@@ -211,8 +228,7 @@ impl PayrollContract {
             asset: asset.clone(),
             recipients: soroban_sdk::vec![&env],
             total_amount: 0,
-            funded: false,
-            distributed: false,
+            status: BatchStatus::Open,
             created_at: env.ledger().timestamp(),
         };
 
@@ -233,7 +249,7 @@ impl PayrollContract {
         }
         .publish(&env);
 
-        id
+        Ok(id)
     }
 
     /// Add a `recipient` with `amount` to `batch_id`.
@@ -249,8 +265,8 @@ impl PayrollContract {
         if caller != batch.creator {
             return Err(Error::Unauthorized);
         }
-        if batch.funded || batch.distributed {
-            return Err(Error::BatchAlreadyFunded);
+        if batch.status != BatchStatus::Open {
+            return Err(Error::InvalidBatchState);
         }
         if amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -264,6 +280,9 @@ impl PayrollContract {
             .ok_or(Error::Overflow)?;
 
         let mut recipients = read_recipients(&env, batch_id);
+        if recipients.len() >= MAX_RECIPIENTS {
+            return Err(Error::TooManyRecipients);
+        }
         recipients.push_back(Recipient {
             address: recipient.clone(),
             amount,
@@ -289,8 +308,8 @@ impl PayrollContract {
     /// into the contract.
     pub fn fund_batch(env: Env, batch_id: u64, funder: Address) -> Result<(), Error> {
         let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
-        if batch.funded || batch.distributed {
-            return Err(Error::BatchAlreadyFunded);
+        if batch.status != BatchStatus::Open {
+            return Err(Error::InvalidBatchState);
         }
         if batch.total_amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -304,7 +323,7 @@ impl PayrollContract {
             &batch.total_amount,
         );
 
-        batch.funded = true;
+        batch.status = BatchStatus::Funded;
         put_batch(&env, &batch);
         extend_persistent_ttl(&env, &DataKey::PayrollBatch(batch_id));
         extend_instance_ttl(&env);
@@ -322,10 +341,7 @@ impl PayrollContract {
     /// Distribute all payments for `batch_id` to its recipients.
     pub fn distribute(env: Env, batch_id: u64) -> Result<(), Error> {
         let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
-        if batch.distributed {
-            return Err(Error::AlreadyDistributed);
-        }
-        if !batch.funded {
+        if batch.status != BatchStatus::Funded {
             return Err(Error::BatchNotFunded);
         }
 
@@ -340,7 +356,7 @@ impl PayrollContract {
             );
         }
 
-        batch.distributed = true;
+        batch.status = BatchStatus::Distributed;
         put_batch(&env, &batch);
         extend_persistent_ttl(&env, &DataKey::PayrollBatch(batch_id));
         extend_instance_ttl(&env);
@@ -361,13 +377,13 @@ impl PayrollContract {
         if caller != batch.creator {
             return Err(Error::Unauthorized);
         }
-        if batch.funded || batch.distributed {
-            return Err(Error::BatchAlreadyFunded);
+        if batch.status != BatchStatus::Open {
+            return Err(Error::InvalidBatchState);
         }
 
         caller.require_auth();
 
-        batch.distributed = true;
+        batch.status = BatchStatus::Cancelled;
         put_batch(&env, &batch);
         extend_persistent_ttl(&env, &DataKey::PayrollBatch(batch_id));
         extend_instance_ttl(&env);
