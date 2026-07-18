@@ -1,4 +1,4 @@
-use crate::{EscrowContract, EscrowContractClient, EscrowStatus};
+use crate::{DataKey, EscrowContract, EscrowContractClient, EscrowStatus};
 use afri_contract_shared::Error;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
@@ -20,7 +20,8 @@ fn setup() -> (Env, Fixture) {
     let env = Env::default();
     env.mock_all_auths();
 
-    let contract_id = env.register(EscrowContract, ());
+    let admin = Address::generate(&env);
+    let contract_id = env.register(EscrowContract, (&admin,));
     let buyer = Address::generate(&env);
     let seller = Address::generate(&env);
     let arbitrator = Address::generate(&env);
@@ -30,7 +31,6 @@ fn setup() -> (Env, Fixture) {
         .address();
 
     StellarAssetClient::new(&env, &asset).mint(&buyer, &INITIAL_BUYER_BALANCE);
-    EscrowContractClient::new(&env, &contract_id).initialize(&Address::generate(&env));
 
     (
         env,
@@ -77,6 +77,11 @@ fn funding_moves_tokens_into_contract_custody() {
     assert_eq!(token(&env, &fixture).balance(&fixture.buyer), 900);
     assert_eq!(token(&env, &fixture).balance(&fixture.contract_id), 100);
     assert_eq!(token(&env, &fixture).balance(&fixture.seller), 0);
+    env.as_contract(&fixture.contract_id, || {
+        let key = DataKey::Escrow(escrow_id);
+        assert!(env.storage().persistent().has(&key));
+        assert!(!env.storage().instance().has(&key));
+    });
 }
 
 #[test]
@@ -170,25 +175,18 @@ fn funding_after_deadline_is_rejected_without_moving_tokens() {
 }
 
 #[test]
-fn create_requires_initialization_and_buyer_authorization() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register(EscrowContract, ());
-    let client = EscrowContractClient::new(&env, &contract_id);
-    let buyer = Address::generate(&env);
-    let seller = Address::generate(&env);
-    let arbitrator = Address::generate(&env);
-    let asset = Address::generate(&env);
-
-    assert_eq!(
-        client.try_create_escrow(&buyer, &seller, &arbitrator, &asset, &10, &10),
-        Err(Ok(Error::NotInitialized))
-    );
-
-    client.initialize(&Address::generate(&env));
+fn create_requires_buyer_authorization() {
+    let (env, fixture) = setup();
     env.set_auths(&[]);
-    assert!(client
-        .try_create_escrow(&buyer, &seller, &arbitrator, &asset, &10, &10)
+    assert!(client(&env, &fixture)
+        .try_create_escrow(
+            &fixture.buyer,
+            &fixture.seller,
+            &fixture.arbitrator,
+            &fixture.asset,
+            &10,
+            &10,
+        )
         .is_err());
 }
 
@@ -312,6 +310,34 @@ fn dispute_requires_party_auth_and_role() {
 }
 
 #[test]
+fn dispute_at_or_after_deadline_is_rejected_and_release_remains_available() {
+    let (env, fixture) = setup();
+    let escrow_id = create_escrow(&env, &fixture, 100, 5);
+    client(&env, &fixture).fund_escrow(&escrow_id, &fixture.buyer);
+    let deadline = client(&env, &fixture).get_escrow(&escrow_id).timeout_at;
+
+    env.ledger().set_timestamp(deadline);
+    assert_eq!(
+        client(&env, &fixture).try_start_dispute(&escrow_id, &fixture.seller),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    env.ledger().set_timestamp(deadline + 1);
+    assert_eq!(
+        client(&env, &fixture).try_start_dispute(&escrow_id, &fixture.buyer),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    env.set_auths(&[]);
+    client(&env, &fixture).release_funds(&escrow_id, &Address::generate(&env));
+    assert_eq!(
+        client(&env, &fixture).get_escrow(&escrow_id).status,
+        EscrowStatus::Completed
+    );
+    assert_eq!(token(&env, &fixture).balance(&fixture.seller), 100);
+}
+
+#[test]
 fn cancellation_requires_party_auth_and_rejects_outsiders() {
     let (env, fixture) = setup();
     let escrow_id = create_escrow(&env, &fixture, 100, 10);
@@ -331,8 +357,8 @@ fn cancellation_requires_party_auth_and_rejects_outsiders() {
 }
 
 #[test]
-fn initialize_is_one_time_only() {
+fn constructor_initializes_escrow_ids() {
     let (env, fixture) = setup();
-    let result = client(&env, &fixture).try_initialize(&Address::generate(&env));
-    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+    assert_eq!(create_escrow(&env, &fixture, 100, 10), 1);
+    assert_eq!(create_escrow(&env, &fixture, 100, 10), 2);
 }
