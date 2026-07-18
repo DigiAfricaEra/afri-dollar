@@ -25,6 +25,7 @@ import stellarRouter from './routes/stellar.routes';
 import treasuryRouter from './routes/treasury.routes';
 import walletRouter from './routes/wallet.routes';
 import { jobQueueService } from './services/job-queue.service';
+import { reportWorker } from './services/report-worker.service';
 // Load backend-level .env file
 config({ path: path.resolve(__dirname, '../.env') });
 
@@ -105,6 +106,7 @@ async function startServer(): Promise<void> {
     console.log('🐘 Database connected successfully');
 
     await jobQueueService.start();
+    await reportWorker.start();
 
     httpServer = app.listen(PORT, () => {
       console.log(`🚀 AfriDollar Backend API running on port ${PORT}`);
@@ -140,6 +142,7 @@ function shutdown(signal: 'SIGTERM' | 'SIGINT'): void {
   console.log(`${signal} signal received: closing HTTP server`);
   void closeHttpServer()
     .then(() => jobQueueService.stop())
+    .then(() => reportWorker.stop())
     .then(() => prisma.$disconnect())
     .catch((error) => {
       console.error('Graceful shutdown failed:', error);
