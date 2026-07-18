@@ -199,8 +199,7 @@ pub fn cancel_upgrade(env: &Env, proposal_id: u64) -> Result<(), Error> {
         .get(&UpgradeDataKey::Proposal(proposal_id))
         .ok_or(Error::NoPendingUpgrade)?;
 
-    if proposal.status == UpgradeStatus::Executed || proposal.status == UpgradeStatus::RolledBack
-    {
+    if proposal.status == UpgradeStatus::Executed || proposal.status == UpgradeStatus::RolledBack {
         return Err(Error::NoPendingUpgrade);
     }
 
@@ -243,11 +242,7 @@ pub fn rollback_upgrade(env: &Env, admin: &Address) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn migrate_storage(
-    _env: &Env,
-    _old_version: ContractVersion,
-    _new_version: ContractVersion,
-) {
+pub fn migrate_storage(_env: &Env, _old_version: ContractVersion, _new_version: ContractVersion) {
     // Storage migration hook - extend for version-specific migrations
 }
 
