@@ -1,6 +1,6 @@
 use crate::{Error, MultisigContract, MultisigContractClient};
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Ledger},
     token::{StellarAssetClient, TokenClient},
     vec, Address, Bytes, Env,
 };
@@ -333,4 +333,42 @@ fn get_transaction_errors_when_not_found() {
     let _ = &env;
     let result = client.try_get_transaction(&999u64);
     assert_eq!(result, Err(Ok(Error::TransactionNotFound)));
+}
+#[test]
+fn execute_excludes_stale_approvals_from_removed_signer() {
+    let (env, client, signers) = setup_with_signers(3, 2);
+    let admin = Address::generate(&env);
+    let (asset, _token, mint) = create_token(&env, &admin);
+    mint.mint(&client.address, &500i128);
+
+    let a = signers.get(0).unwrap();
+    let b = signers.get(1).unwrap();
+    let dest = Address::generate(&env);
+    let tx_id = client.create_transaction(&a, &dest, &asset, &200i128, &empty_data(&env));
+    client.approve(&a, &tx_id);
+    client.approve(&b, &tx_id);
+
+    // Remove one of the two approvers before execution.
+    let cosigners = vec![&env, a.clone(), signers.get(2).unwrap()];
+    client.remove_signer(&cosigners, &b);
+
+    // Only `a`'s approval still counts; below the threshold of 2.
+    let result = client.try_execute(&tx_id);
+    assert_eq!(result, Err(Ok(Error::ThresholdNotMet)));
+}
+
+#[test]
+fn put_tx_extends_instance_ttl_alongside_transaction_ttl() {
+    let (env, client, signers) = setup_with_signers(2, 1);
+    let creator = signers.get(0).unwrap();
+    let dest = Address::generate(&env);
+    let asset = Address::generate(&env);
+    client.create_transaction(&creator, &dest, &asset, &100i128, &empty_data(&env));
+
+    // Both instance storage (signers/threshold) and the persistent
+    // transaction entry must remain readable well past a typical
+    // single-write TTL window, proving put_tx bumps both lifetimes.
+    env.ledger().with_mut(|li| li.sequence_number += 100_000);
+    assert_eq!(client.get_threshold(), 1);
+    assert_eq!(client.get_transaction(&1u64).id, 1);
 }

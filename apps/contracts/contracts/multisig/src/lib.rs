@@ -109,6 +109,7 @@ pub struct TransactionCreated {
     pub tx_id: u64,
     pub creator: Address,
     pub destination: Address,
+    pub asset: Address,
     pub amount: i128,
 }
 
@@ -130,12 +131,27 @@ pub struct Executed {
     pub approval_count: u32,
 }
 
-/// Emitted when the signer set or threshold changes.
-#[contractevent(topics = ["multisig", "cfg_changed"], data_format = "single-value")]
+/// Emitted when a signer is added via `add_signer`.
+#[contractevent(topics = ["multisig", "signer_add"], data_format = "single-value")]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConfigChanged {
+pub struct SignerAdded {
     #[topic]
-    pub kind: soroban_sdk::Symbol,
+    pub signer: Address,
+}
+
+/// Emitted when a signer is removed via `remove_signer`.
+#[contractevent(topics = ["multisig", "signer_rm"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignerRemoved {
+    #[topic]
+    pub signer: Address,
+}
+
+/// Emitted when the approval threshold changes via `change_threshold`.
+#[contractevent(topics = ["multisig", "threshold"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThresholdChanged {
+    #[topic]
     pub new_threshold: u32,
 }
 
@@ -202,6 +218,7 @@ fn read_tx(env: &Env, tx_id: u64) -> Result<Transaction, Error> {
 fn put_tx(env: &Env, tx: &Transaction) {
     env.storage().persistent().set(&DataKey::Tx(tx.id), tx);
     extend_persistent_ttl(env, &DataKey::Tx(tx.id));
+    extend_instance_ttl(env);
 }
 
 #[contract]
@@ -287,6 +304,7 @@ impl MultisigContract {
             tx_id,
             creator,
             destination,
+            asset: tx.asset.clone(),
             amount,
         }
         .publish(&env);
@@ -334,7 +352,16 @@ impl MultisigContract {
             return Err(Error::AlreadyExecuted);
         }
         let threshold = read_threshold(&env)?;
-        let approval_count = tx.approvals.len();
+        // Only count approvals from addresses that are still current
+        // signers. A signer who approved and was later removed via
+        // `remove_signer` must not have their stale approval still count
+        // toward the threshold.
+        let signers = read_signers(&env)?;
+        let approval_count = tx
+            .approvals
+            .iter()
+            .filter(|a| is_signer(&signers, a))
+            .count() as u32;
         if approval_count < threshold {
             return Err(Error::ThresholdNotMet);
         }
@@ -367,19 +394,12 @@ impl MultisigContract {
         if is_signer(&signers, &new_signer) {
             return Err(Error::DuplicateSigner);
         }
-        signers.push_back(new_signer);
+        signers.push_back(new_signer.clone());
         env.storage().instance().set(&DataKey::Signers, &signers);
         extend_instance_ttl(&env);
-
-        let threshold = read_threshold(&env)?;
-        ConfigChanged {
-            kind: soroban_sdk::symbol_short!("add_sig"),
-            new_threshold: threshold,
-        }
-        .publish(&env);
+        SignerAdded { signer: new_signer }.publish(&env);
         Ok(())
     }
-
     /// Remove a signer. Requires at least `threshold`-many current
     /// signers among `callers` to each authorize. Fails with
     /// `Error::SignerNotFound` if `signer_to_remove` is not currently a
@@ -410,9 +430,8 @@ impl MultisigContract {
         env.storage().instance().set(&DataKey::Signers, &updated);
         extend_instance_ttl(&env);
 
-        ConfigChanged {
-            kind: soroban_sdk::symbol_short!("rm_sig"),
-            new_threshold: threshold,
+        SignerRemoved {
+            signer: signer_to_remove,
         }
         .publish(&env);
         Ok(())
@@ -438,11 +457,7 @@ impl MultisigContract {
             .set(&DataKey::Threshold, &new_threshold);
         extend_instance_ttl(&env);
 
-        ConfigChanged {
-            kind: soroban_sdk::symbol_short!("thresh"),
-            new_threshold,
-        }
-        .publish(&env);
+        ThresholdChanged { new_threshold }.publish(&env);
         Ok(())
     }
 
