@@ -36,10 +36,9 @@ fn create_token<'a>(
 fn setup() -> (Env, TreasuryContractClient<'static>, Address) {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
-    let contract_id = env.register(TreasuryContract, ());
-    let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    client.initialize(&admin);
+    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let client = TreasuryContractClient::new(&env, &contract_id);
     (env, client, admin)
 }
 
@@ -81,11 +80,10 @@ fn initialize_is_one_time_only() {
 #[test]
 fn initialize_requires_admin_auth() {
     let env = Env::default();
-    let contract_id = env.register(TreasuryContract, ());
-    let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let client = TreasuryContractClient::new(&env, &contract_id);
     // Clear auths — admin-gated operations still require the stored admin's auth.
     env.set_auths(&[]);
     let asset = Address::generate(&env);
@@ -95,14 +93,16 @@ fn initialize_requires_admin_auth() {
 }
 
 #[test]
-fn initialize_fails_without_admin_auth() {
+fn attacker_cannot_claim_admin_role() {
     let env = Env::default();
-    let contract_id = env.register(TreasuryContract, ());
-    let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    // No auth set — initialize requires the admin to sign.
-    let result = client.try_initialize(&admin);
-    assert!(result.is_err());
+    let attacker = Address::generate(&env);
+    env.mock_all_auths_allowing_non_root_auth();
+    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let client = TreasuryContractClient::new(&env, &contract_id);
+    // Attacker supplies their own address and tries to re-initialize.
+    let result = client.try_initialize(&attacker);
+    assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
 
 // ---------------------------------------------------------------------------
@@ -132,11 +132,10 @@ fn enable_clawback_sets_config() {
 #[test]
 fn enable_clawback_requires_admin_auth() {
     let env = Env::default();
-    let contract_id = env.register(TreasuryContract, ());
-    let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     env.mock_all_auths_allowing_non_root_auth();
-    client.initialize(&admin);
+    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let client = TreasuryContractClient::new(&env, &contract_id);
 
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
@@ -149,11 +148,10 @@ fn enable_clawback_requires_admin_auth() {
 #[test]
 fn enable_clawback_requires_admin_auth_even_for_real_admin() {
     let env = Env::default();
-    let contract_id = env.register(TreasuryContract, ());
-    let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let client = TreasuryContractClient::new(&env, &contract_id);
 
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
@@ -227,11 +225,10 @@ fn disable_clawback_fails_without_config() {
 #[test]
 fn disable_clawback_requires_admin_auth() {
     let env = Env::default();
-    let contract_id = env.register(TreasuryContract, ());
-    let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     env.mock_all_auths_allowing_non_root_auth();
-    client.initialize(&admin);
+    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let client = TreasuryContractClient::new(&env, &contract_id);
 
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
@@ -314,11 +311,10 @@ fn execute_clawback_fails_with_wrong_authority() {
 #[test]
 fn execute_clawback_requires_authority_auth() {
     let env = Env::default();
-    let contract_id = env.register(TreasuryContract, ());
-    let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     env.mock_all_auths();
-    client.initialize(&admin);
+    let contract_id = env.register(TreasuryContract, (admin.clone(),));
+    let client = TreasuryContractClient::new(&env, &contract_id);
     let asset = Address::generate(&env);
     let authority = Address::generate(&env);
     let from = Address::generate(&env);

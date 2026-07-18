@@ -141,10 +141,21 @@ pub struct TreasuryContract;
 
 #[contractimpl]
 impl TreasuryContract {
+    /// Constructor called atomically during `env.register()`. Sets `admin`
+    /// and the initial record counter. Prevents front-running because
+    /// deployment and initialization are one atomic operation.
+    pub fn __constructor(env: Env, admin: Address) {
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::NextRecordId, &1u64);
+        extend_instance_ttl(&env);
+    }
+
     /// Initialize the contract, recording `admin`.
-    /// Requires the caller to authenticate as `admin`. Must be called
+    /// Requires the caller to authenticate as `admin`. Should be called
     /// atomically during deployment (same transaction) to prevent
-    /// front-running. Fails with `Error::AlreadyInitialized` if called twice.
+    /// front-running. Prefer using the `__constructor` for new deployments.
+    /// Fails with `Error::AlreadyInitialized` if called twice.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
@@ -296,6 +307,7 @@ impl TreasuryContract {
             &DataKey::AssetRecordId(asset.clone(), asset_count),
             &record_id,
         );
+        extend_persistent_ttl(&env, &DataKey::AssetRecordId(asset.clone(), asset_count));
         env.storage()
             .persistent()
             .set(&asset_count_key, &(asset_count + 1));
