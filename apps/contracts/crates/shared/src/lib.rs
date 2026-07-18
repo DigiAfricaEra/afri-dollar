@@ -78,7 +78,7 @@ pub fn get_version(env: &Env) -> ContractVersion {
             major: 1,
             minor: 0,
             patch: 0,
-            wasm_hash: BytesN::from_array(&env, &[0u8; 32]),
+            wasm_hash: BytesN::from_array(env, &[0u8; 32]),
         })
 }
 
