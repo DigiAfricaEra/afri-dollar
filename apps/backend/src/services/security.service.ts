@@ -99,7 +99,7 @@ class SecurityStore {
             url: process.env.REDIS_URL,
           });
 
-          client.on('error', (error) => {
+          client.on('error', (error: unknown) => {
             console.error('Redis security store error:', error);
           });
 

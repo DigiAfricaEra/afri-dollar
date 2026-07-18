@@ -4,6 +4,8 @@ export * from './auth.types';
 export * from './payment.types';
 export * from './wallet.types';
 export * from './security.types';
+export * from './job.types';
+export * from './report.type';
 
 export type RegisterRequest = {
   email: string;

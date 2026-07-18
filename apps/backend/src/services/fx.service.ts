@@ -304,7 +304,7 @@ async function syncRateHistory(rates: RateDefinition[]): Promise<void> {
       },
     });
 
-    if (latestRate && latestRate.rate === rate.rate && latestRate.source === rate.source) {
+    if (latestRate?.rate === rate.rate && latestRate.source === rate.source) {
       continue;
     }
 

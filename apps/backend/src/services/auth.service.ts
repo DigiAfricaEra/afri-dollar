@@ -126,7 +126,7 @@ export const AuthService = {
       where: { email: data.email },
     });
 
-    if (!user || !user.passwordHash) {
+    if (!user?.passwordHash) {
       throw new AppError(401, 'Invalid credentials');
     }
 

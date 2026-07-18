@@ -4,6 +4,8 @@
     "outDir": "./dist",
     "module": "commonjs",
     "noEmit": false,
+    "declaration": false,
+    "declarationMap": false,
     "esModuleInterop": true,
     "resolveJsonModule": true
   },

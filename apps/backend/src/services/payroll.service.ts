@@ -103,7 +103,7 @@ async function assertBatchOwnedByUser(
     include: { wallet: { select: { userId: true } } },
   });
 
-  if (!batch || batch.wallet.userId !== userId) {
+  if (batch?.wallet.userId !== userId) {
     throw new Error('Payroll batch not found');
   }
 
@@ -288,7 +288,7 @@ export const PayrollService = {
       },
     });
 
-    if (!batch || batch.wallet.userId !== userId) {
+    if (batch?.wallet.userId !== userId) {
       throw new Error('Payroll batch not found');
     }
 
@@ -338,7 +338,7 @@ export const PayrollService = {
       },
     });
 
-    if (!batch || batch.wallet.userId !== userId) {
+    if (batch?.wallet.userId !== userId) {
       await logAudit(userId, 'payroll_batch_process_failed', batchId, false, {
         error: 'Batch not found',
       });

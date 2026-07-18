@@ -103,7 +103,7 @@ async function checkTravelRuleCompliance(
   if (amountNum < 1000) {
     return 'not_applicable';
   }
-  if (!beneficiaryInfo || !beneficiaryInfo.name || !beneficiaryInfo.country) {
+  if (!beneficiaryInfo?.name || !beneficiaryInfo.country) {
     return 'failed';
   }
   return 'passed';
@@ -248,7 +248,7 @@ export const PaymentService = {
       include: { wallet: true },
     });
 
-    if (!transaction || transaction.userId !== userId) {
+    if (transaction?.userId !== userId) {
       throw new Error('Payment not found');
     }
 
@@ -362,7 +362,7 @@ export const PaymentService = {
       where: { id: paymentId },
     });
 
-    if (!transaction || transaction.userId !== userId) {
+    if (transaction?.userId !== userId) {
       throw new Error('Payment not found');
     }
 
@@ -422,7 +422,7 @@ export const PaymentService = {
       where: { id: paymentId },
     });
 
-    if (!transaction || transaction.userId !== userId) {
+    if (transaction?.userId !== userId) {
       throw new Error('Payment not found');
     }
 
