@@ -1,7 +1,10 @@
 #![no_std]
 
 use afri_contract_shared::{extend_instance_ttl, Error};
-use soroban_sdk::{contract, contractevent, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{
+    contract, contractevent, contractimpl, contracttype, token::TokenClient, Address, Env,
+    MuxedAddress,
+};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,7 +124,13 @@ impl EscrowContract {
         amount: i128,
         timeout_seconds: u64,
     ) -> Result<u64, Error> {
+        buyer.require_auth();
+
         if amount <= 0 {
+            return Err(Error::Unauthorized);
+        }
+
+        if buyer == seller || buyer == arbitrator || seller == arbitrator {
             return Err(Error::Unauthorized);
         }
 
@@ -129,7 +138,7 @@ impl EscrowContract {
             .storage()
             .instance()
             .get(&DataKey::NextEscrowId)
-            .unwrap_or(1);
+            .ok_or(Error::NotInitialized)?;
 
         let now = env.ledger().timestamp();
         let escrow = Escrow {
@@ -186,7 +195,17 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
 
+        if env.ledger().timestamp() >= escrow.timeout_at {
+            return Err(Error::Unauthorized);
+        }
+
         funder.require_auth();
+        TokenClient::new(&env, &escrow.asset).transfer(
+            &funder,
+            MuxedAddress::from(env.current_contract_address()),
+            &escrow.amount,
+        );
+
         escrow.status = EscrowStatus::Funded;
         env.storage()
             .instance()
@@ -210,37 +229,24 @@ impl EscrowContract {
             .ok_or(Error::NotInitialized)?;
 
         let now = env.ledger().timestamp();
-        if escrow.status == EscrowStatus::Completed
-            || escrow.status == EscrowStatus::Refunded
-            || escrow.status == EscrowStatus::Cancelled
-        {
-            return Err(Error::Unauthorized);
-        }
-
-        if escrow.status == EscrowStatus::Funded && now >= escrow.timeout_at {
-            escrow.status = EscrowStatus::Completed;
-            escrow.released_at = Some(now);
-            env.storage()
-                .instance()
-                .set(&DataKey::Escrow(escrow_id), &escrow);
-            extend_instance_ttl(&env);
-            EscrowReleased {
-                escrow_id,
-                amount: escrow.amount,
-            }
-            .publish(&env);
-            return Ok(());
-        }
-
         if escrow.status != EscrowStatus::Funded {
             return Err(Error::Unauthorized);
         }
 
-        if releaser != escrow.buyer && releaser != escrow.arbitrator {
-            return Err(Error::Unauthorized);
+        if now < escrow.timeout_at {
+            if releaser != escrow.buyer && releaser != escrow.arbitrator {
+                return Err(Error::Unauthorized);
+            }
+
+            releaser.require_auth();
         }
 
-        releaser.require_auth();
+        TokenClient::new(&env, &escrow.asset).transfer(
+            &env.current_contract_address(),
+            MuxedAddress::from(escrow.seller.clone()),
+            &escrow.amount,
+        );
+
         escrow.status = EscrowStatus::Completed;
         escrow.released_at = Some(now);
         env.storage()
@@ -273,6 +279,12 @@ impl EscrowContract {
         }
 
         arbitrator.require_auth();
+        TokenClient::new(&env, &escrow.asset).transfer(
+            &env.current_contract_address(),
+            MuxedAddress::from(escrow.buyer.clone()),
+            &escrow.amount,
+        );
+
         escrow.status = EscrowStatus::Refunded;
         env.storage()
             .instance()
@@ -340,6 +352,12 @@ impl EscrowContract {
         }
 
         arbitrator.require_auth();
+        TokenClient::new(&env, &escrow.asset).transfer(
+            &env.current_contract_address(),
+            MuxedAddress::from(winner.clone()),
+            &escrow.amount,
+        );
+
         escrow.status = if winner == escrow.seller {
             EscrowStatus::Completed
         } else {
