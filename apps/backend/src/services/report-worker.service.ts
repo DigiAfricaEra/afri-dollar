@@ -155,7 +155,7 @@ export class ReportWorkerService {
 
     void this.queue.process(WORKER_CONCURRENCY, async (job: Bull.Job<ReportJobPayload>) => {
       if (job.data.requestId) {
-        await processReportWithRetry(job, job.data.requestId);
+        await this.processReportWithRetry(job, job.data.requestId);
       } else if (job.data.templateId) {
         await processScheduledReport(job.data.templateId);
       }

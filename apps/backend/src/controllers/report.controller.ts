@@ -47,9 +47,10 @@ export const ReportController = {
   async generate(req: AuthRequest, res: Response): Promise<void> {
     try {
       const isAdmin = req.user!.role === 'ADMIN';
-      const { reportType, format, parameters, targetUserId } = (
-        isAdmin ? generateAdminReportSchema : generateReportSchema
-      ).parse(req.body);
+      const reportInput = (isAdmin ? generateAdminReportSchema : generateReportSchema).parse(
+        req.body
+      );
+      const { reportType, format, parameters } = reportInput;
 
       const adminReportTypes = new Set([
         'payroll-report',
@@ -61,7 +62,10 @@ export const ReportController = {
         throw new AppError(403, 'Admin privileges required for this report type');
       }
 
-      const ownerId = isAdmin && targetUserId ? targetUserId : req.user!.userId;
+      const targetUserId = isAdmin
+        ? (reportInput as z.infer<typeof generateAdminReportSchema>).targetUserId
+        : undefined;
+      const ownerId = targetUserId ?? req.user!.userId;
       const report = await ReportService.generate(ownerId, reportType, format, parameters);
 
       res.status(201).json({ success: true, data: report });

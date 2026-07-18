@@ -1,6 +1,10 @@
 import fs from 'fs';
 
 import { Prisma } from '@afri-dollar/database';
+import type {
+  ReportType as PrismaReportType,
+  ReportFormat as PrismaReportFormat,
+} from '@afri-dollar/database';
 
 import prisma from '../config/database';
 import { AppError } from '../types';
@@ -81,8 +85,8 @@ export const ReportService = {
     const report = await prisma.reportRequest.create({
       data: {
         userId,
-        reportType,
-        format,
+        reportType: reportType as unknown as PrismaReportType,
+        format: format,
         parameters: (parameters ?? {}) as Prisma.InputJsonValue,
         status: 'pending',
       },
@@ -196,8 +200,8 @@ export const ReportService = {
     const template = await prisma.reportTemplate.create({
       data: {
         name: data.name,
-        reportType: data.reportType,
-        format: data.format,
+        reportType: data.reportType as unknown as PrismaReportType,
+        format: data.format as unknown as PrismaReportFormat,
         query: data.query ?? null,
         schedule: data.schedule ?? null,
       },
@@ -240,8 +244,10 @@ export const ReportService = {
       where: { id },
       data: {
         ...(data.name !== undefined && { name: data.name }),
-        ...(data.reportType !== undefined && { reportType: data.reportType }),
-        ...(data.format !== undefined && { format: data.format }),
+        ...(data.reportType !== undefined && {
+          reportType: data.reportType as unknown as PrismaReportType,
+        }),
+        ...(data.format !== undefined && { format: data.format as unknown as PrismaReportFormat }),
         ...(data.query !== undefined && { query: data.query }),
         ...(data.schedule !== undefined && { schedule: data.schedule }),
       },
