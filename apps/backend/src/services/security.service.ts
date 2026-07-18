@@ -13,6 +13,8 @@ const BLOCK_THRESHOLD = 8;
 const MAX_PROGRESSIVE_DELAY_MS = 60_000;
 const LOCKOUT_WINDOW_MS = 30 * 60 * 1000;
 const DEFAULT_AUTH_WINDOW_MS = 15 * 60 * 1000;
+const FAILED_ATTEMPT_TTL_MS = 24 * 60 * 60 * 1000;
+const EXTERNAL_REPUTATION_TIMEOUT_MS = 2000;
 
 type AuthEndpoint = 'login' | 'register' | 'refresh' | 'logout';
 
@@ -72,7 +74,6 @@ function delay(ms: number): Promise<void> {
 class SecurityStore {
   private redisClient: RedisClient | null = null;
   private redisConnectPromise: Promise<RedisClient | null> | null = null;
-  private redisDisabled = false;
 
   private readonly failedAttempts = new Map<string, StoredFailedAttempt>();
 
@@ -84,11 +85,11 @@ class SecurityStore {
   >();
 
   private async getRedisClient(): Promise<RedisClient | null> {
-    if (this.redisDisabled || !process.env.REDIS_URL) {
+    if (!process.env.REDIS_URL) {
       return null;
     }
 
-    if (this.redisClient) {
+    if (this.redisClient && this.redisClient.isOpen) {
       return this.redisClient;
     }
 
@@ -101,6 +102,8 @@ class SecurityStore {
 
           client.on('error', (error: unknown) => {
             console.error('Redis security store error:', error);
+            this.redisClient = null;
+            this.redisConnectPromise = null;
           });
 
           await client.connect();
@@ -108,7 +111,8 @@ class SecurityStore {
           return client;
         } catch (error) {
           console.error('Redis security store unavailable, using in-memory fallback:', error);
-          this.redisDisabled = true;
+          this.redisClient = null;
+          this.redisConnectPromise = null;
           return null;
         }
       })();
@@ -146,15 +150,33 @@ class SecurityStore {
       return this.deserializeStoredFailedAttempt(raw);
     }
 
-    return this.failedAttempts.get(key) ?? null;
+    const record = this.failedAttempts.get(key);
+    if (!record) {
+      return null;
+    }
+
+    const isBlocked = record.blockedUntil && new Date(record.blockedUntil).getTime() > Date.now();
+    const isExpired = Date.now() - record.lastAttemptAt.getTime() > FAILED_ATTEMPT_TTL_MS;
+
+    if (isExpired && !isBlocked) {
+      this.failedAttempts.delete(key);
+      return null;
+    }
+
+    return record;
   }
 
   private async writeStoredFailedAttempt(record: StoredFailedAttempt): Promise<void> {
     const redis = await this.getRedisClient();
     const key = this.getFailedAttemptKey(record.ip);
+    const ttlMs = record.blockedUntil
+      ? Math.max(1000, new Date(record.blockedUntil).getTime() - Date.now())
+      : FAILED_ATTEMPT_TTL_MS;
 
     if (redis) {
-      await redis.set(key, JSON.stringify(this.serializeStoredFailedAttempt(record)));
+      await redis.set(key, JSON.stringify(this.serializeStoredFailedAttempt(record)), {
+        PX: ttlMs,
+      });
       return;
     }
 
@@ -218,7 +240,10 @@ class SecurityStore {
       });
       await redis.set(
         this.getFailedAttemptKey(record.ip),
-        JSON.stringify(this.serializeStoredFailedAttempt(enriched))
+        JSON.stringify(this.serializeStoredFailedAttempt(enriched)),
+        {
+          PX: LOCKOUT_WINDOW_MS,
+        }
       );
       return;
     }
@@ -262,10 +287,16 @@ class SecurityStore {
       return cached;
     }
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), EXTERNAL_REPUTATION_TIMEOUT_MS);
+
     try {
       const response = await fetch(
-        `${providerUrl.replace(/\/$/, '')}?ip=${encodeURIComponent(ip)}`
+        `${providerUrl.replace(/\/$/, '')}?ip=${encodeURIComponent(ip)}`,
+        { signal: controller.signal }
       );
+      clearTimeout(timeoutId);
+
       if (!response.ok) {
         return null;
       }
@@ -289,8 +320,9 @@ class SecurityStore {
       await this.cacheExternalAssessment(ip, assessment);
       return assessment;
     } catch (error) {
+      clearTimeout(timeoutId);
       console.error(
-        'External IP reputation service failed, falling back to local heuristics:',
+        'External IP reputation service failed or timed out, falling back to local heuristics:',
         error
       );
       return null;
@@ -380,28 +412,48 @@ class SecurityStore {
 
   async assessIpReputation(ip: string): Promise<IpReputationAssessment> {
     const record = await this.readStoredFailedAttempt(ip);
+    const localAssessment = this.buildLocalAssessment(ip, record);
     const externalAssessment = await this.assessWithExternalProvider(ip);
 
     if (externalAssessment) {
-      const blocked = record?.blockedUntil
-        ? new Date(record.blockedUntil).getTime() > Date.now()
-        : false;
-      if (blocked) {
-        return {
-          ...externalAssessment,
-          flagged: true,
-          riskScore: Math.max(externalAssessment.riskScore, 100),
-          reasons: [...externalAssessment.reasons, 'Current lockout state detected locally'],
-        };
-      }
+      const combinedReasons = Array.from(
+        new Set([...localAssessment.reasons, ...externalAssessment.reasons])
+      );
+      const combinedRiskScore = Math.max(localAssessment.riskScore, externalAssessment.riskScore);
+      const combinedFlagged = localAssessment.flagged || externalAssessment.flagged;
+      const source: 'local' | 'external' | 'combined' =
+        localAssessment.reasons.length > 0 ? 'combined' : 'external';
 
-      return externalAssessment;
+      return {
+        ip,
+        riskScore: combinedRiskScore,
+        flagged: combinedFlagged,
+        reasons: combinedReasons,
+        source,
+      };
     }
 
-    return this.buildLocalAssessment(ip, record);
+    return localAssessment;
   }
 
   async evaluateAuthRequest(ip: string, endpoint: AuthEndpoint): Promise<AuthSecurityDecision> {
+    const record = await this.readStoredFailedAttempt(ip);
+    if (record?.blockedUntil && new Date(record.blockedUntil).getTime() > Date.now()) {
+      const lockoutRemainingMs = new Date(record.blockedUntil).getTime() - Date.now();
+      const retryAfterSeconds = Math.ceil(lockoutRemainingMs / 1000);
+      const assessment = await this.assessIpReputation(ip);
+      return {
+        allowed: false,
+        assessment: {
+          ...assessment,
+          flagged: true,
+          riskScore: Math.max(assessment.riskScore, 100),
+          reasons: Array.from(new Set([...assessment.reasons, 'Lockout is still active'])),
+        },
+        retryAfterSeconds,
+      };
+    }
+
     const assessment = await this.assessIpReputation(ip);
     const rateLimitResult = await this.checkAndConsumeRateLimit(ip, endpoint, assessment.flagged);
 
@@ -410,20 +462,6 @@ class SecurityStore {
         allowed: false,
         assessment,
         retryAfterSeconds: rateLimitResult.retryAfterSeconds,
-      };
-    }
-
-    const record = await this.readStoredFailedAttempt(ip);
-    if (record?.blockedUntil && new Date(record.blockedUntil).getTime() > Date.now()) {
-      return {
-        allowed: false,
-        assessment: {
-          ...assessment,
-          flagged: true,
-          riskScore: Math.max(assessment.riskScore, 100),
-          reasons: [...assessment.reasons, 'Lockout is still active'],
-        },
-        retryAfterSeconds: Math.ceil((new Date(record.blockedUntil).getTime() - Date.now()) / 1000),
       };
     }
 

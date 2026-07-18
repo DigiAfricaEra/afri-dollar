@@ -195,11 +195,11 @@ Authorization: Bearer <jwt_token>
 - `POST /api/v1/auth/refresh` - Refresh JWT token
 - `GET /api/v1/auth/me` - Get current user info
 
-#### Security
+#### Security (Admin Only)
 
-- `GET /api/v1/security/metrics` - View blocked and flagged IP metrics
-- `GET /api/v1/security/blocked-ips` - List currently blocked IPs
-- `GET /api/v1/security/flagged-ips` - List flagged IPs and failed attempts
+- `GET /api/v1/security/metrics` - View blocked and flagged IP metrics (Admin only)
+- `GET /api/v1/security/blocked-ips` - List currently blocked IPs (Admin only)
+- `GET /api/v1/security/flagged-ips` - List flagged IPs and failed attempts (Admin only)
 
 #### Wallet Management
 
@@ -458,13 +458,14 @@ Ensure all required environment variables are set in production:
 - Ensure Redis is running
 - Verify Redis credentials
 
-## Support
+## Support & Community
 
-For backend-specific issues:
+For backend-specific support and community discussion:
 
 - Email: dev.mes.anonfedora@gmail.com
 - GitHub Issues: [afri-dollar/issues](https://github.com/DigiAfricaEra/afri-dollar/issues)
-- Community: [Join the project community](https://t.me/DigiAfrcaEra/1)
+- Telegram Channel: [Telegram Channel](https://t.me/DigiAfrcaEra)
+- Telegram Community: [Telegram Community Group](https://t.me/DigiAfrcaEra/1)
 
 ## License
 

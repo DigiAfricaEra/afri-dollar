@@ -1,6 +1,7 @@
 import type { NextFunction, Response } from 'express';
 
 import { SecurityService, type AuthEndpoint } from '../services/security.service';
+import { getRequestIp } from '../utils';
 
 import type { AuthRequest } from './auth.middleware';
 
@@ -10,10 +11,6 @@ function toRetryAfterHeader(seconds?: number): string | undefined {
   }
 
   return String(Math.max(1, Math.ceil(seconds)));
-}
-
-function getRequestIp(req: AuthRequest): string {
-  return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
 async function runAuthSecurityMiddleware(

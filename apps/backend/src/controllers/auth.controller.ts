@@ -7,7 +7,7 @@ import { Response } from 'express';
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { AuthService } from '../services/auth.service';
 import { SecurityService } from '../services/security.service';
-import { AppError } from '../types';
+import { InvalidCredentialsError } from '../types';
 import type {
   RegisterRequest,
   LoginRequest,
@@ -16,31 +16,11 @@ import type {
   TokenRefreshResponse,
   UserResponse,
 } from '../types';
-
-/**
- * Handles error mapping to avoid dense walls of string checks
- */
-function handleError(res: Response, error: unknown): void {
-  if (error instanceof AppError) {
-    res.status(error.status).json({ success: false, error: error.message });
-    return;
-  }
-
-  if (error instanceof Error) {
-    res.status(500).json({ success: false, error: 'Internal server error' });
-    return;
-  }
-
-  res.status(500).json({ success: false, error: 'An unknown error occurred' });
-}
+import { getRequestIp, handleError } from '../utils';
 
 function getUserAgent(headers: AuthRequest['headers']): string | undefined {
   const userAgent = headers['user-agent'];
   return typeof userAgent === 'string' ? userAgent : undefined;
-}
-
-function getRequestIp(req: AuthRequest): string {
-  return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
 export const AuthController = {
@@ -111,45 +91,49 @@ export const AuthController = {
       };
       res.status(200).json(response);
     } catch (error) {
-      if (error instanceof Error) {
-        let loggedFailure = false;
-        if (error.message === 'Invalid credentials') {
-          const failedAttempt = await SecurityService.recordFailedAttempt({
-            ip: getRequestIp(req),
+      if (error instanceof InvalidCredentialsError) {
+        const failedAttempt = await SecurityService.recordFailedAttempt({
+          ip: getRequestIp(req),
+        });
+
+        AuthService.createAuditLog({
+          action: 'login',
+          resource: 'user',
+          ipAddress: req.ip,
+          userAgent: getUserAgent(req.headers),
+          success: false,
+          metadata: {
+            error: error.message,
+            attempts: failedAttempt.record.attempts,
+            riskScore: failedAttempt.assessment.riskScore,
+            flagged: failedAttempt.assessment.flagged,
+            delayMs: failedAttempt.delayMs,
+            blockedUntil: failedAttempt.blockedUntil?.toISOString(),
+          },
+        }).catch((err) => console.error('Failed to log audit login failure:', err));
+
+        if (failedAttempt.blockedUntil || failedAttempt.delayMs > 0) {
+          const retryAfterSeconds = failedAttempt.blockedUntil
+            ? Math.ceil((failedAttempt.blockedUntil.getTime() - Date.now()) / 1000)
+            : Math.max(1, Math.ceil(failedAttempt.delayMs / 1000));
+
+          res.setHeader('Retry-After', String(retryAfterSeconds));
+          res.status(429).json({
+            success: false,
+            error: 'Too many failed login attempts. Please try again later.',
+            retryAfterSeconds,
           });
-
-          if (failedAttempt.delayMs > 0) {
-            await SecurityService.sleep(failedAttempt.delayMs);
-          }
-
-          AuthService.createAuditLog({
-            action: 'login',
-            resource: 'user',
-            ipAddress: req.ip,
-            userAgent: getUserAgent(req.headers),
-            success: false,
-            metadata: {
-              error: error.message,
-              attempts: failedAttempt.record.attempts,
-              riskScore: failedAttempt.assessment.riskScore,
-              flagged: failedAttempt.assessment.flagged,
-              delayMs: failedAttempt.delayMs,
-              blockedUntil: failedAttempt.blockedUntil?.toISOString(),
-            },
-          }).catch((err) => console.error('Failed to log audit login failure:', err));
-          loggedFailure = true;
+          return;
         }
-
-        if (!loggedFailure) {
-          AuthService.createAuditLog({
-            action: 'login',
-            resource: 'user',
-            ipAddress: req.ip,
-            userAgent: getUserAgent(req.headers),
-            success: false,
-            metadata: { error: error.message },
-          }).catch((err) => console.error('Failed to log audit login failure:', err));
-        }
+      } else if (error instanceof Error) {
+        AuthService.createAuditLog({
+          action: 'login',
+          resource: 'user',
+          ipAddress: req.ip,
+          userAgent: getUserAgent(req.headers),
+          success: false,
+          metadata: { error: error.message },
+        }).catch((err) => console.error('Failed to log audit login failure:', err));
       }
       handleError(res, error);
     }
