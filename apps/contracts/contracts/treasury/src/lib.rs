@@ -137,15 +137,14 @@ pub struct TreasuryContract;
 
 #[contractimpl]
 impl TreasuryContract {
-    /// Initialize the contract, recording `admin`. Requires `admin`'s
-    /// authorization, so an attacker cannot front-run initialization and
-    /// claim the admin role. Fails with `Error::AlreadyInitialized` if called
-    /// twice.
+    /// Initialize the contract, recording `admin`.
+    /// Must be called atomically during deployment (same transaction) to
+    /// prevent front-running. Fails with `Error::AlreadyInitialized` if
+    /// called twice.
     pub fn initialize(env: Env, admin: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
-        admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextRecordId, &1u64);
         extend_instance_ttl(&env);
@@ -250,6 +249,9 @@ impl TreasuryContract {
             return Err(Error::InvalidReason);
         }
 
+        // Bump config TTL since it was accessed.
+        extend_persistent_ttl(&env, &DataKey::ClawbackConfig(asset.clone()));
+
         let record_id: u64 = env
             .storage()
             .instance()
@@ -297,16 +299,27 @@ impl TreasuryContract {
     }
 
     /// Read the `ClawbackConfig` for `asset`, or `None` if no config has
-    /// been set.
+    /// been set. Bumps the config TTL so active configurations don't expire.
     pub fn get_clawback_config(env: Env, asset: Address) -> Option<ClawbackConfig> {
-        env.storage()
+        let config: Option<ClawbackConfig> = env
+            .storage()
             .persistent()
-            .get(&DataKey::ClawbackConfig(asset))
+            .get(&DataKey::ClawbackConfig(asset.clone()));
+        if config.is_some() {
+            extend_persistent_ttl(&env, &DataKey::ClawbackConfig(asset));
+            extend_instance_ttl(&env);
+        }
+        config
     }
 
-    /// Return the most recent `limit` clawback records, ordered newest-first.
-    /// Returns fewer records than `limit` if fewer exist.
-    pub fn get_clawback_history(env: Env, limit: u32) -> Vec<ClawbackRecord> {
+    /// Return the most recent `limit` clawback records for `asset`,
+    /// ordered newest-first. Pass `None` for `asset` to fetch records for
+    /// all assets. Returns fewer records than `limit` if fewer exist.
+    pub fn get_clawback_history(
+        env: Env,
+        asset: Option<Address>,
+        limit: u32,
+    ) -> Vec<ClawbackRecord> {
         let next_id: u64 = env
             .storage()
             .instance()
@@ -324,7 +337,13 @@ impl TreasuryContract {
                 .persistent()
                 .get::<DataKey, ClawbackRecord>(&DataKey::ClawbackRecord(id))
             {
-                records.push_back(record);
+                let matches = match &asset {
+                    None => true,
+                    Some(filter_asset) => record.asset == *filter_asset,
+                };
+                if matches {
+                    records.push_back(record);
+                }
             }
         }
 

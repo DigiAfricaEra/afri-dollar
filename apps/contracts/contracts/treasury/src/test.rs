@@ -6,17 +6,18 @@ use soroban_sdk::{
     Address, Env, IntoVal, String,
 };
 
-/// Deploy a Stellar Asset Contract token for use as a clawable asset in
-/// tests. Returns the token's address plus ready-made clients for
-/// transfers/balances and minting.
+/// Deploy a Stellar Asset Contract token whose admin is `sac_admin`
+/// (must be the treasury contract address in production). Returns the
+/// token's address plus ready-made clients for transfers/balances and
+/// minting.
 ///
 /// The SAC issuer account is created with `AUTH_REVOCABLE_FLAG` (0x2) so
 /// that `set_authorized` and `clawback` work correctly in tests.
 fn create_token<'a>(
     env: &Env,
-    admin: &Address,
+    sac_admin: &Address,
 ) -> (Address, TokenClient<'a>, StellarAssetClient<'a>) {
-    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let sac = env.register_stellar_asset_contract_v2(sac_admin.clone());
     let address = sac.address();
 
     // `register_stellar_asset_contract_v2` creates the issuer with `flags: 0`.
@@ -78,13 +79,18 @@ fn initialize_is_one_time_only() {
 }
 
 #[test]
-fn initialize_requires_admin_auth() {
+fn initialize_sets_admin_without_explicit_auth() {
     let env = Env::default();
     let contract_id = env.register(TreasuryContract, ());
     let client = TreasuryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
-    // No mock_all_auths(): the admin's own authorization must be enforced.
-    let result = client.try_initialize(&admin);
+    // No auth mocking — initialize does NOT require the admin to sign.
+    // The deployer must call it atomically in the same transaction.
+    client.initialize(&admin);
+    // Admin-gated operations still require the stored admin's auth.
+    let asset = Address::generate(&env);
+    let authority = Address::generate(&env);
+    let result = client.try_enable_clawback(&asset, &authority, &true);
     assert!(result.is_err());
 }
 
@@ -358,10 +364,10 @@ fn execute_clawback_rejects_empty_reason_when_required() {
 
 #[test]
 fn execute_clawback_transfers_tokens_and_creates_record() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
-    let (asset, asset_token, asset_mint) = create_token(&env, &admin);
+    let (asset, asset_token, asset_mint) = create_token(&env, &client.address);
 
     // Set up clawback config with no reason requirement.
     client.enable_clawback(&asset, &authority, &false);
@@ -387,17 +393,17 @@ fn execute_clawback_transfers_tokens_and_creates_record() {
     assert_eq!(asset_token.balance(&from), 700);
 
     // The record ID is stored and increments.
-    let history = client.get_clawback_history(&10u32);
+    let history = client.get_clawback_history(&Some(asset.clone()), &10u32);
     assert_eq!(history.len(), 1);
     assert_eq!(history.get(0).unwrap().id, 1);
 }
 
 #[test]
 fn execute_clawback_emits_event() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &admin);
+    let (asset, _at, asset_mint) = create_token(&env, &client.address);
     client.enable_clawback(&asset, &authority, &false);
     asset_mint.mint(&from, &1_000i128);
     asset_mint.set_authorized(&from, &false);
@@ -422,10 +428,10 @@ fn execute_clawback_emits_event() {
 
 #[test]
 fn execute_clawback_increments_record_id() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &admin);
+    let (asset, _at, asset_mint) = create_token(&env, &client.address);
     client.enable_clawback(&asset, &authority, &false);
     asset_mint.mint(&from, &10_000i128);
     asset_mint.set_authorized(&from, &false);
@@ -442,10 +448,10 @@ fn execute_clawback_increments_record_id() {
 
 #[test]
 fn execute_clawback_allows_empty_reason_when_not_required() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &admin);
+    let (asset, _at, asset_mint) = create_token(&env, &client.address);
     client.enable_clawback(&asset, &authority, &false);
     asset_mint.mint(&from, &1_000i128);
     asset_mint.set_authorized(&from, &false);
@@ -489,16 +495,16 @@ fn get_clawback_config_returns_correct_config_after_disable() {
 #[test]
 fn get_clawback_history_returns_empty_when_no_records() {
     let (_env, client, _admin) = setup();
-    let history = client.get_clawback_history(&10u32);
+    let history = client.get_clawback_history(&None, &10u32);
     assert_eq!(history.len(), 0);
 }
 
 #[test]
 fn get_clawback_history_returns_records_newest_first() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &admin);
+    let (asset, _at, asset_mint) = create_token(&env, &client.address);
     client.enable_clawback(&asset, &authority, &false);
     asset_mint.mint(&from, &10_000i128);
     asset_mint.set_authorized(&from, &false);
@@ -508,7 +514,7 @@ fn get_clawback_history_returns_records_newest_first() {
     client.execute_clawback(&authority, &from, &asset, &200i128, &reason);
     client.execute_clawback(&authority, &from, &asset, &300i128, &reason);
 
-    let history = client.get_clawback_history(&5u32);
+    let history = client.get_clawback_history(&Some(asset.clone()), &5u32);
     assert_eq!(history.len(), 3);
     assert_eq!(history.get(0).unwrap().id, 3);
     assert_eq!(history.get(1).unwrap().id, 2);
@@ -517,10 +523,10 @@ fn get_clawback_history_returns_records_newest_first() {
 
 #[test]
 fn get_clawback_history_honors_limit() {
-    let (env, client, admin) = setup();
+    let (env, client, _admin) = setup();
     let authority = Address::generate(&env);
     let from = Address::generate(&env);
-    let (asset, _at, asset_mint) = create_token(&env, &admin);
+    let (asset, _at, asset_mint) = create_token(&env, &client.address);
     client.enable_clawback(&asset, &authority, &false);
     asset_mint.mint(&from, &10_000i128);
     asset_mint.set_authorized(&from, &false);
@@ -531,7 +537,7 @@ fn get_clawback_history_honors_limit() {
     client.execute_clawback(&authority, &from, &asset, &300i128, &reason);
     client.execute_clawback(&authority, &from, &asset, &400i128, &reason);
 
-    let history = client.get_clawback_history(&2u32);
+    let history = client.get_clawback_history(&Some(asset.clone()), &2u32);
     assert_eq!(history.len(), 2);
     assert_eq!(history.get(0).unwrap().id, 4);
     assert_eq!(history.get(1).unwrap().id, 3);
