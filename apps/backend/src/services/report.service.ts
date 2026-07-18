@@ -13,11 +13,8 @@ import type {
   ReportStatus,
 } from '../types';
 
-import {
-  getFilePath,
-  validateReportFormat,
-} from './report.helpers';
 import { reportWorker } from './report-worker.service';
+import { getFilePath, validateReportFormat } from './report.helpers';
 
 function getMimeType(format: ReportFormat): string {
   const types: Record<ReportFormat, string> = {
