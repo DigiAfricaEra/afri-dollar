@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 import { Prisma } from '@afri-dollar/database';
 import Bull from 'bull';
 
@@ -22,7 +24,8 @@ const RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 30_000;
 
 type ReportJobPayload = {
-  requestId: string;
+  requestId?: string;
+  templateId?: string;
 };
 
 function getErrorMessage(error: unknown): string {
@@ -45,18 +48,18 @@ function isTransientError(error: unknown): boolean {
 }
 
 async function processReport(requestId: string): Promise<void> {
-  const report = await prisma.reportRequest.findUnique({ where: { id: requestId } });
-
-  if (!report) {
-    throw new AppError(404, `Report not found: ${requestId}`);
-  }
-
-  if (report.status === 'completed') return;
-
-  await prisma.reportRequest.update({
-    where: { id: requestId },
+  const result = await prisma.reportRequest.updateMany({
+    where: { id: requestId, status: 'pending' },
     data: { status: 'generating' },
   });
+
+  if (result.count === 0) return;
+
+  const report = await prisma.reportRequest.findUnique({
+    where: { id: requestId },
+  });
+
+  if (!report) return;
 
   const reportType = validateReportType(report.reportType);
   const fetcher = getDataFetcher(reportType);
@@ -66,22 +69,25 @@ async function processReport(requestId: string): Promise<void> {
   }
 
   const params = report.parameters as ReportParameters | undefined;
-  const data = await fetcher(params, FETCH_LIMIT);
+  const data = await fetcher(report.userId, params, FETCH_LIMIT);
 
   const format = validateReportFormat(report.format);
   const filePath = getFilePath(requestId, format);
+  const tempPath = `${filePath}.tmp`;
 
   switch (format) {
     case 'csv':
-      await generateCSV(data, filePath);
+      await generateCSV(data, tempPath);
       break;
     case 'pdf':
-      await generatePDF(data, filePath, `${report.reportType} Report`);
+      await generatePDF(data, tempPath, `${report.reportType} Report`);
       break;
     case 'xlsx':
-      await generateXLSX(data, filePath);
+      await generateXLSX(data, tempPath);
       break;
   }
+
+  fs.renameSync(tempPath, filePath);
 
   await prisma.reportRequest.update({
     where: { id: requestId },
@@ -91,6 +97,25 @@ async function processReport(requestId: string): Promise<void> {
       downloadUrl: `/api/v1/reports/${requestId}/download`,
     },
   });
+}
+
+async function processScheduledReport(templateId: string): Promise<void> {
+  const template = await prisma.reportTemplate.findUnique({
+    where: { id: templateId },
+  });
+
+  if (!template?.schedule) return;
+
+  const report = await prisma.reportRequest.create({
+    data: {
+      userId: 'system',
+      reportType: template.reportType,
+      format: template.format,
+      status: 'pending',
+    },
+  });
+
+  await processReport(report.id);
 }
 
 function buildJobOptions(): Bull.JobOptions {
@@ -129,33 +154,53 @@ export class ReportWorkerService {
     });
 
     void this.queue.process(WORKER_CONCURRENCY, async (job: Bull.Job<ReportJobPayload>) => {
-      const { requestId } = job.data;
-
-      try {
-        await processReport(requestId);
-      } catch (error) {
-        const message = getErrorMessage(error);
-        console.error(`Report generation failed for ${requestId}:`, message);
-
-        await prisma.reportRequest
-          .update({
-            where: { id: requestId },
-            data: {
-              status: 'failed',
-              completedAt: new Date(),
-            },
-          })
-          .catch((err) => {
-            console.error(`Failed to update report status for ${requestId}:`, err);
-          });
-
-        if (isTransientError(error)) {
-          throw error;
-        }
+      if (job.data.requestId) {
+        await processReportWithRetry(job, job.data.requestId);
+      } else if (job.data.templateId) {
+        await processScheduledReport(job.data.templateId);
       }
     });
 
     this.status = 'ready';
+  }
+
+  private async processReportWithRetry(
+    job: Bull.Job<ReportJobPayload>,
+    requestId: string
+  ): Promise<void> {
+    try {
+      await processReport(requestId);
+    } catch (error) {
+      const message = getErrorMessage(error);
+      console.error(`Report generation failed for ${requestId}:`, message);
+
+      const isLastAttempt = job.attemptsMade >= (job.opts.attempts || 1);
+
+      if (isTransientError(error) && !isLastAttempt) {
+        await prisma.reportRequest
+          .update({
+            where: { id: requestId },
+            data: { status: 'pending' },
+          })
+          .catch((err) => {
+            console.error(`Failed to reset report status for ${requestId}:`, err);
+          });
+
+        throw error;
+      }
+
+      await prisma.reportRequest
+        .update({
+          where: { id: requestId },
+          data: {
+            status: 'failed',
+            completedAt: new Date(),
+          },
+        })
+        .catch((err) => {
+          console.error(`Failed to update report status for ${requestId}:`, err);
+        });
+    }
   }
 
   async stop(): Promise<void> {
@@ -173,11 +218,40 @@ export class ReportWorkerService {
 
   async enqueue(requestId: string): Promise<void> {
     if (!this.queue) {
-      await processReport(requestId);
-      return;
+      throw new AppError(503, 'Report worker is not initialized');
     }
 
     await this.queue.add({ requestId }, buildJobOptions());
+  }
+
+  async scheduleTemplate(templateId: string): Promise<void> {
+    if (!this.queue) return;
+
+    const template = await prisma.reportTemplate.findUnique({
+      where: { id: templateId },
+    });
+
+    if (!template?.schedule) return;
+
+    await this.queue.add(
+      { templateId },
+      {
+        ...buildJobOptions(),
+        repeat: { cron: template.schedule },
+        jobId: `template-${templateId}`,
+      }
+    );
+  }
+
+  async cancelScheduledTemplate(templateId: string): Promise<void> {
+    if (!this.queue) return;
+
+    const jobs = await this.queue.getRepeatableJobs();
+    const job = jobs.find((j) => j.id === `template-${templateId}`);
+
+    if (job) {
+      await this.queue.removeRepeatableByKey(job.key);
+    }
   }
 }
 

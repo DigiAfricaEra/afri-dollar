@@ -24,6 +24,28 @@ enum JobExecutionStatus {
   failed
 }
 
+enum ReportType {
+  transaction_history
+  compliance_report
+  financial_statement
+  payroll_report
+  treasury_report
+  audit_log
+}
+
+enum ReportFormat {
+  csv
+  pdf
+  xlsx
+}
+
+enum ReportStatus {
+  pending
+  generating
+  completed
+  failed
+}
+
 // User model for authentication and authorization
 model User {
   id            String      @id @default(cuid())
@@ -45,6 +67,7 @@ model User {
   transactions    Transaction[]
   kycRecords      KYCRecord[]
   refreshTokens   RefreshToken[]
+  reportRequests  ReportRequest[]
 
   @@index([email])
   @@index([walletAddress])
@@ -315,10 +338,11 @@ model PayrollItem {
 model ReportRequest {
   id              String        @id @default(cuid())
   userId          String
-  reportType      String
-  format          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reportType      ReportType
+  format          ReportFormat
   parameters      Json?
-  status          String        @default("pending")
+  status          ReportStatus  @default(pending)
   downloadUrl     String?
   createdAt       DateTime      @default(now())
   completedAt     DateTime?
@@ -329,10 +353,10 @@ model ReportRequest {
 model ReportTemplate {
   id              String        @id @default(cuid())
   name            String
-  reportType      String
+  reportType      ReportType
   query           String?
   config          Json?
-  format          String
+  format          ReportFormat
   schedule        String?
 
   @@index([reportType])

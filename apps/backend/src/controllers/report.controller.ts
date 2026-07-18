@@ -6,6 +6,7 @@ import { ReportService } from '../services/report.service';
 import { AppError } from '../types';
 import {
   createReportTemplateSchema,
+  generateAdminReportSchema,
   generateReportSchema,
   reportIdParamSchema,
   reportTemplateIdParamSchema,
@@ -45,8 +46,23 @@ function handleError(res: Response, error: unknown): void {
 export const ReportController = {
   async generate(req: AuthRequest, res: Response): Promise<void> {
     try {
-      const { reportType, format, parameters } = generateReportSchema.parse(req.body);
-      const report = await ReportService.generate(req.user!.userId, reportType, format, parameters);
+      const isAdmin = req.user!.role === 'ADMIN';
+      const { reportType, format, parameters, targetUserId } = (
+        isAdmin ? generateAdminReportSchema : generateReportSchema
+      ).parse(req.body);
+
+      const adminReportTypes = new Set([
+        'payroll-report',
+        'treasury-report',
+        'compliance-report',
+        'audit-log',
+      ]);
+      if (adminReportTypes.has(reportType) && !isAdmin) {
+        throw new AppError(403, 'Admin privileges required for this report type');
+      }
+
+      const ownerId = isAdmin && targetUserId ? targetUserId : req.user!.userId;
+      const report = await ReportService.generate(ownerId, reportType, format, parameters);
 
       res.status(201).json({ success: true, data: report });
     } catch (error) {
@@ -95,6 +111,8 @@ export const ReportController = {
         console.error('Report download stream error:', err);
         if (!res.headersSent) {
           res.status(500).json({ success: false, error: 'Download failed' });
+        } else {
+          res.destroy();
         }
       });
 

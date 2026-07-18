@@ -50,10 +50,11 @@ export function validateReportFormat(value: string): ReportFormat {
 }
 
 async function fetchTransactionHistory(
+  userId: string,
   params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
-  const where: Record<string, unknown> = {};
+  const where: Record<string, unknown> = { userId };
 
   if (params?.startDate != null || params?.endDate != null) {
     where.createdAt = {};
@@ -63,7 +64,6 @@ async function fetchTransactionHistory(
       (where.createdAt as Record<string, unknown>).lte = new Date(params.endDate);
   }
 
-  if (params?.userId != null) where.userId = params.userId;
   if (params?.assetCode != null) where.assetCode = params.assetCode;
   if (params?.status != null) where.status = params.status;
 
@@ -75,10 +75,11 @@ async function fetchTransactionHistory(
 }
 
 async function fetchComplianceData(
+  userId: string,
   params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
-  const where: Record<string, unknown> = {};
+  const where: Record<string, unknown> = { userId };
 
   if (params?.status != null) where.status = params.status;
 
@@ -102,10 +103,11 @@ async function fetchComplianceData(
 }
 
 async function fetchFinancialStatement(
+  userId: string,
   params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
-  const where: Record<string, unknown> = {};
+  const where: Record<string, unknown> = { userId };
 
   if (params?.startDate != null || params?.endDate != null) {
     where.createdAt = {};
@@ -123,10 +125,12 @@ async function fetchFinancialStatement(
 }
 
 async function fetchPayrollReport(
+  userId: string,
   _params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
   const batches = await prisma.payrollBatch.findMany({
+    where: { wallet: { userId } },
     include: { items: true },
     orderBy: { createdAt: 'desc' },
     take: limit ?? REPORT_FETCH_LIMIT,
@@ -138,17 +142,21 @@ async function fetchPayrollReport(
     description: batch.description ?? '',
     status: batch.status,
     itemCount: batch.items.length,
-    totalAmount: Decimal.sum(...batch.items.map((item) => item.amount)).toString(),
+    totalAmount:
+      batch.items.length > 0
+        ? Decimal.sum(...batch.items.map((item) => item.amount)).toString()
+        : new Decimal(0).toString(),
     createdAt: batch.createdAt,
   }));
 }
 
 async function fetchTreasuryReport(
+  userId: string,
   _params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
   const wallets = await prisma.wallet.findMany({
-    where: { walletType: 'treasury', isActive: true },
+    where: { userId, walletType: 'treasury', isActive: true },
     include: { balances: true },
     take: limit ?? REPORT_FETCH_LIMIT,
   });
@@ -163,8 +171,12 @@ async function fetchTreasuryReport(
   );
 }
 
-async function fetchAuditLogs(params?: ReportParameters, limit?: number): Promise<ReportData[]> {
-  const where: Record<string, unknown> = {};
+async function fetchAuditLogs(
+  userId: string,
+  params?: ReportParameters,
+  limit?: number
+): Promise<ReportData[]> {
+  const where: Record<string, unknown> = { userId };
 
   if (params?.startDate != null || params?.endDate != null) {
     where.createdAt = {};
@@ -173,8 +185,6 @@ async function fetchAuditLogs(params?: ReportParameters, limit?: number): Promis
     if (params.endDate != null)
       (where.createdAt as Record<string, unknown>).lte = new Date(params.endDate);
   }
-
-  if (params?.userId != null) where.userId = params.userId;
 
   return prisma.auditLog.findMany({
     where,
@@ -185,7 +195,7 @@ async function fetchAuditLogs(params?: ReportParameters, limit?: number): Promis
 
 export function getDataFetcher(
   reportType: ReportType
-): ((params?: ReportParameters, limit?: number) => Promise<ReportData[]>) | null {
+): ((userId: string, params?: ReportParameters, limit?: number) => Promise<ReportData[]>) | null {
   switch (reportType) {
     case 'transaction-history':
       return fetchTransactionHistory;
@@ -251,14 +261,17 @@ export async function generatePDF(
 
       doc.fontSize(10).font('Helvetica-Bold');
       let xPosition = 30;
-      const tableTop = doc.y;
+      let rowStartY = doc.y;
+      let maxRowHeight = 0;
 
       headers.forEach((header) => {
-        doc.text(header, xPosition, tableTop, { width: colWidth, align: 'left' });
+        doc.text(header, xPosition, rowStartY, { width: colWidth, align: 'left' });
+        const cellHeight = doc.heightOfString(header, { width: colWidth });
+        if (cellHeight > maxRowHeight) maxRowHeight = cellHeight;
         xPosition += colWidth;
       });
 
-      doc.moveDown();
+      doc.y = rowStartY + maxRowHeight + 4;
       doc.font('Helvetica').fontSize(8);
 
       for (const row of data) {
@@ -266,15 +279,21 @@ export async function generatePDF(
           doc.addPage();
         }
 
+        rowStartY = doc.y;
+        maxRowHeight = 0;
         xPosition = 30;
+
         headers.forEach((header) => {
           const cellValue = row[header];
           // eslint-disable-next-line @typescript-eslint/no-base-to-string
           const displayValue = cellValue == null ? '' : String(cellValue);
-          doc.text(displayValue, xPosition, doc.y, { width: colWidth, align: 'left' });
+          doc.text(displayValue, xPosition, rowStartY, { width: colWidth, align: 'left' });
+          const cellHeight = doc.heightOfString(displayValue, { width: colWidth });
+          if (cellHeight > maxRowHeight) maxRowHeight = cellHeight;
           xPosition += colWidth;
         });
-        doc.moveDown(0.5);
+
+        doc.y = rowStartY + maxRowHeight + 2;
       }
     } else {
       doc.fontSize(12).text('No data available', { align: 'center' });

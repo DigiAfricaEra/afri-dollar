@@ -88,7 +88,15 @@ export const ReportService = {
       },
     });
 
-    await reportWorker.enqueue(report.id);
+    try {
+      await reportWorker.enqueue(report.id);
+    } catch (error) {
+      await prisma.reportRequest.update({
+        where: { id: report.id },
+        data: { status: 'failed', completedAt: new Date() },
+      });
+      throw error;
+    }
 
     return mapReport(report);
   },
@@ -195,6 +203,10 @@ export const ReportService = {
       },
     });
 
+    if (data.schedule) {
+      await reportWorker.scheduleTemplate(template.id);
+    }
+
     return mapReportTemplate(template);
   },
 
@@ -235,6 +247,13 @@ export const ReportService = {
       },
     });
 
+    if (data.schedule !== undefined) {
+      await reportWorker.cancelScheduledTemplate(id);
+      if (data.schedule) {
+        await reportWorker.scheduleTemplate(id);
+      }
+    }
+
     return mapReportTemplate(template);
   },
 
@@ -245,6 +264,7 @@ export const ReportService = {
       throw new AppError(404, 'Report template not found');
     }
 
+    await reportWorker.cancelScheduledTemplate(id);
     await prisma.reportTemplate.delete({ where: { id } });
   },
 };
