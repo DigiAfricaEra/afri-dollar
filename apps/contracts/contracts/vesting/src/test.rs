@@ -93,6 +93,30 @@ fn initialize_requires_admin_auth() {
     assert!(result.is_err());
 }
 
+#[test]
+fn create_vesting_before_initialize_fails() {
+    let env = Env::default();
+    let contract_id = env.register(VestingContract, ());
+    let client = VestingContractClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let asset = Address::generate(&env);
+    env.mock_all_auths();
+
+    let result = client.try_create_vesting(
+        &creator,
+        &beneficiary,
+        &asset,
+        &1_000i128,
+        &100u64,
+        &100u64,
+        &200u64,
+        &VestingType::Linear,
+        &soroban_sdk::vec![&env],
+    );
+    assert_eq!(result, Err(Ok(Error::NotInitialized)));
+}
+
 // ---------------------------------------------------------------------------
 // pause / unpause
 // ---------------------------------------------------------------------------
@@ -181,27 +205,40 @@ fn unpause_re_enables_operations() {
 
 #[test]
 fn pause_requires_admin_auth() {
-    let (env, _client, _admin) = setup();
-    let intruder = Address::generate(&env);
-    let contract_id = env.register(VestingContract, ());
-    let client = VestingContractClient::new(&env, &contract_id);
-    env.mock_all_auths();
-    client.initialize(&Address::generate(&env));
+    let (env, client, admin) = setup();
+    // Correct admin but no auth — exercises require_auth, not identity check.
+    env.set_auths(&[]);
+    let result = client.try_pause(&admin);
+    assert!(result.is_err());
+}
 
+#[test]
+fn pause_rejects_wrong_admin() {
+    let (env, client, _admin) = setup();
+    let intruder = Address::generate(&env);
     env.set_auths(&[]);
     let result = client.try_pause(&intruder);
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]
 fn unpause_requires_admin_auth() {
     let (env, client, admin) = setup();
     client.pause(&admin);
+    // Correct admin but no auth — exercises require_auth, not identity check.
+    env.set_auths(&[]);
+    let result = client.try_unpause(&admin);
+    assert!(result.is_err());
+}
 
+#[test]
+fn unpause_rejects_wrong_admin() {
+    let (env, client, admin) = setup();
+    client.pause(&admin);
     let intruder = Address::generate(&env);
     env.set_auths(&[]);
     let result = client.try_unpause(&intruder);
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 #[test]
@@ -826,6 +863,36 @@ fn claim_immediate_before_start_returns_zero() {
 
     let claimed = client.claim_vested(&id, &beneficiary);
     assert_eq!(claimed, 0);
+}
+
+#[test]
+fn immediate_vesting_ignores_cliff_time() {
+    let (env, client, admin) = setup();
+    let creator = Address::generate(&env);
+    let beneficiary = Address::generate(&env);
+    let (asset, token, mint) = create_token(&env, &admin);
+    mint.mint(&creator, &1_000i128);
+
+    // cliff_time (150) > start_time (100) — Immediate should ignore cliff.
+    let id = client.create_vesting(
+        &creator,
+        &beneficiary,
+        &asset,
+        &1_000i128,
+        &100u64,
+        &150u64,
+        &200u64,
+        &VestingType::Immediate,
+        &soroban_sdk::vec![&env],
+    );
+
+    // At timestamp 100 (start_time) — before cliff (150), but Immediate
+    // should vest fully.
+    env.ledger().with_mut(|li| li.timestamp += 100);
+
+    let claimed = client.claim_vested(&id, &beneficiary);
+    assert_eq!(claimed, 1_000);
+    assert_eq!(token.balance(&beneficiary), 1_000);
 }
 
 // ---------------------------------------------------------------------------

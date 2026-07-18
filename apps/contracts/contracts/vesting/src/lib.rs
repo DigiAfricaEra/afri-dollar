@@ -277,9 +277,13 @@ fn require_admin(env: &Env, caller: &Address) -> Result<(), Error> {
     Ok(())
 }
 
-/// Check that the contract is not paused. Returns `Error::ContractPaused`
-/// if it is.
+/// Check that the contract is initialized and not paused.
+/// Returns `Error::NotInitialized` if no admin has been set,
+/// or `Error::ContractPaused` if the emergency pause is active.
 fn require_not_paused(env: &Env) -> Result<(), Error> {
+    if !env.storage().instance().has(&DataKey::Admin) {
+        return Err(Error::NotInitialized);
+    }
     let paused: bool = env
         .storage()
         .instance()
@@ -289,6 +293,16 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
         return Err(Error::ContractPaused);
     }
     Ok(())
+}
+
+/// Checked wide-intermediate `amount * numer / denom`. Returns
+/// `Error::Overflow` if the intermediate product exceeds `i128`.
+fn checked_mul_div(amount: i128, numer: i128, denom: i128) -> Result<i128, Error> {
+    amount
+        .checked_mul(numer)
+        .ok_or(Error::Overflow)?
+        .checked_div(denom)
+        .ok_or(Error::Overflow)
 }
 
 // ---------------------------------------------------------------------------
@@ -301,45 +315,52 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 ///   `total_amount * (now - start_time) / (end_time - start_time)`
 /// clamped to 0 before cliff and to `total_amount` after end.
 ///
-/// For `Milestone`, it sums each milestone's share whose timestamp has
-/// passed, clamped to 0 before cliff.
+/// For `Milestone`, it sums the cumulative percentage of all passed
+/// milestones and applies it once to `total_amount`, clamped to 0 before
+/// cliff. This avoids per-milestone rounding loss.
 ///
-/// For `Immediate`, it is `total_amount` once `now >= start_time`.
+/// For `Immediate`, it is `total_amount` once `now >= start_time` (cliff
+/// does not apply).
 fn compute_vested_amount(
     schedule: &VestingSchedule,
     milestones: &Vec<Milestone>,
     now: u64,
-) -> i128 {
-    if now < schedule.cliff_time {
-        return 0;
-    }
+) -> Result<i128, Error> {
     match schedule.vesting_type {
         VestingType::Immediate => {
             if now < schedule.start_time {
-                0
+                Ok(0)
             } else {
-                schedule.total_amount
+                Ok(schedule.total_amount)
             }
         }
         VestingType::Linear => {
+            if now < schedule.cliff_time {
+                return Ok(0);
+            }
             if now >= schedule.end_time {
-                return schedule.total_amount;
+                return Ok(schedule.total_amount);
             }
             let elapsed = now.saturating_sub(schedule.start_time);
             let duration = schedule.end_time.saturating_sub(schedule.start_time);
             if duration == 0 {
-                return schedule.total_amount;
+                return Ok(schedule.total_amount);
             }
-            schedule.total_amount * elapsed as i128 / duration as i128
+            checked_mul_div(schedule.total_amount, elapsed as i128, duration as i128)
         }
         VestingType::Milestone => {
-            let mut vested: i128 = 0;
+            if now < schedule.cliff_time {
+                return Ok(0);
+            }
+            let mut cumulative_pct: u32 = 0;
             for m in milestones.iter() {
                 if m.timestamp <= now {
-                    vested += schedule.total_amount * m.percentage as i128 / 100;
+                    cumulative_pct = cumulative_pct
+                        .checked_add(m.percentage)
+                        .ok_or(Error::Overflow)?;
                 }
             }
-            vested
+            checked_mul_div(schedule.total_amount, cumulative_pct as i128, 100)
         }
     }
 }
@@ -511,7 +532,7 @@ impl VestingContract {
         } else {
             let now = env.ledger().timestamp();
             let milestones = read_milestones(&env, vesting_id);
-            let vested = compute_vested_amount(&schedule, &milestones, now);
+            let vested = compute_vested_amount(&schedule, &milestones, now)?;
             vested
                 .checked_sub(schedule.claimed_amount)
                 .ok_or(Error::Overflow)?
@@ -565,7 +586,7 @@ impl VestingContract {
 
         let now = env.ledger().timestamp();
         let milestones = read_milestones(&env, vesting_id);
-        let vested_amount = compute_vested_amount(&schedule, &milestones, now);
+        let vested_amount = compute_vested_amount(&schedule, &milestones, now)?;
 
         let unvested = schedule
             .total_amount
@@ -637,7 +658,7 @@ impl VestingContract {
         } else {
             let now = env.ledger().timestamp();
             let milestones = read_milestones(&env, vesting_id);
-            compute_vested_amount(&schedule, &milestones, now)
+            compute_vested_amount(&schedule, &milestones, now)?
         };
 
         let claimable = total_vested
