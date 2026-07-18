@@ -204,6 +204,23 @@ export function getDataFetcher(
   }
 }
 
+const CSV_INJECTION_PREFIXES = ['=', '+', '-', '@'];
+
+function sanitizeCSVValue(value: unknown): unknown {
+  if (typeof value === 'string' && value.length > 0 && CSV_INJECTION_PREFIXES.includes(value[0])) {
+    return `'${value}`;
+  }
+  return value;
+}
+
+function sanitizeCSVRecord(record: ReportData): ReportData {
+  const sanitized: ReportData = {};
+  for (const [key, value] of Object.entries(record)) {
+    sanitized[key] = sanitizeCSVValue(value);
+  }
+  return sanitized;
+}
+
 export async function generateCSV(data: ReportData[], filePath: string): Promise<void> {
   if (data.length === 0) {
     fs.writeFileSync(filePath, '');
@@ -212,7 +229,7 @@ export async function generateCSV(data: ReportData[], filePath: string): Promise
 
   const headers = Object.keys(data[0]).map((key) => ({ id: key, title: key }));
   const writer = createObjectCsvWriter({ path: filePath, header: headers });
-  await writer.writeRecords(data);
+  await writer.writeRecords(data.map(sanitizeCSVRecord));
 }
 
 export async function generatePDF(

@@ -80,12 +80,32 @@ export const generateReportSchema = z.object({
   format: z.enum(['csv', 'pdf', 'xlsx']),
   parameters: z
     .object({
-      startDate: z.string().optional(),
-      endDate: z.string().optional(),
+      startDate: z
+        .string()
+        .refine((val) => !isNaN(Date.parse(val)), {
+          message: 'startDate must be a valid date string',
+        })
+        .optional(),
+      endDate: z
+        .string()
+        .refine((val) => !isNaN(Date.parse(val)), {
+          message: 'endDate must be a valid date string',
+        })
+        .optional(),
       userId: z.string().optional(),
       assetCode: z.string().optional(),
       status: z.string().optional(),
     })
+    .refine(
+      ({ startDate, endDate }) => {
+        if (startDate == null || endDate == null) return true;
+        return new Date(startDate) <= new Date(endDate);
+      },
+      {
+        message: 'startDate must be less than or equal to endDate',
+        path: ['startDate'],
+      }
+    )
     .optional(),
 });
 
