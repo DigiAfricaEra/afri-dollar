@@ -119,14 +119,13 @@ fn put_batch(env: &Env, batch: &BatchOperation) {
 
 fn string_to_symbol(env: &Env, s: &soroban_sdk::String) -> Symbol {
     let bytes = s.to_bytes();
-    let len = bytes.len() as usize;
+    let len = bytes.len();
+    let copy_len = len.min(32);
     let mut buf = [0u8; 32];
-    for (i, b) in bytes.iter().enumerate() {
-        if i < 32 {
-            buf[i] = b;
-        }
-    }
-    let s = core::str::from_utf8(&buf[..len.min(32)]).unwrap_or("");
+    bytes
+        .slice(0..copy_len)
+        .copy_into_slice(&mut buf[..copy_len as usize]);
+    let s = core::str::from_utf8(&buf[..copy_len as usize]).unwrap_or("");
     Symbol::new(env, s)
 }
 
@@ -203,9 +202,13 @@ impl BatchExecutor {
             return Err(Error::InvalidBatchState);
         }
 
-        // Execute every operation. Do NOT write status before the loop:
-        // if any operation fails, returning Err will roll back all writes
-        // including both contract mutations and our own storage changes.
+        // Write Executing status as a reentrancy guard. If any operation
+        // fails, returning Err will trigger Soroban host-level rollback
+        // of ALL writes — including this Executing write — restoring the
+        // batch to Pending.
+        batch.status = BatchStatus::Executing;
+        put_batch(&env, &batch);
+
         for op in batch.operations.iter() {
             let fn_name = string_to_symbol(&env, &op.function_name);
             let result = env.try_invoke_contract::<Val, soroban_sdk::Error>(

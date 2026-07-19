@@ -1,6 +1,9 @@
+extern crate std;
+
 use crate::{BatchExecutor, BatchExecutorClient, BatchStatus, ContractOperation};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Env, IntoVal, String, Vec,
+    contract, contracterror, contractimpl, contracttype, testutils::Events, vec, Address, Env,
+    IntoVal, String, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -37,6 +40,25 @@ impl OpContract {
     /// Tests whether write persists when caller catches via try_invoke_contract.
     pub fn fail(env: Env, _val: u32) -> Result<(), OpError> {
         env.storage().persistent().set(&OpKey::Value, &999u32);
+        Err(OpError::Failed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Malicious reentrancy callee
+// ---------------------------------------------------------------------------
+
+#[contract]
+pub struct ReenterContract;
+
+#[contractimpl]
+impl ReenterContract {
+    pub fn trigger(env: Env, executor: Address, batch_id: u64) -> Result<(), OpError> {
+        let client = BatchExecutorClient::new(&env, &executor);
+        let result = client.try_execute_batch(&batch_id);
+        if result.is_ok() {
+            panic!("reentrant execute_batch unexpectedly succeeded");
+        }
         Err(OpError::Failed)
     }
 }
@@ -80,6 +102,13 @@ fn create_batch_stores_operations_and_initial_status() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 42)]);
     let id = cl.create_batch(&ops);
+
+    // BatchCreated event emitted
+    assert_ne!(
+        env.events().all(),
+        vec![&env],
+        "BatchCreated event expected"
+    );
 
     let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Pending);
@@ -139,6 +168,13 @@ fn execute_batch_all_operations_succeed() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 100)]);
     let id = cl.create_batch(&ops);
     cl.execute_batch(&id);
+
+    // BatchExecuted event emitted
+    assert_ne!(
+        env.events().all(),
+        vec![&env],
+        "BatchExecuted event expected"
+    );
 
     let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Completed);
@@ -240,6 +276,35 @@ fn execute_batch_rejects_non_pending_state() {
         result.is_err(),
         "executing cancelled batch should fail (pre-flight)"
     );
+}
+
+#[test]
+fn execute_batch_reentrancy_guard() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let reenter = env.register(ReenterContract, ());
+    let executor_id = register_executor(&env);
+    let cl = client(&env, &executor_id);
+
+    let ops = Vec::from_array(
+        &env,
+        [ContractOperation {
+            contract_id: reenter,
+            function_name: String::from_str(&env, "trigger"),
+            args: Vec::from_array(&env, [executor_id.into_val(&env), 1u64.into_val(&env)]),
+        }],
+    );
+    let id = cl.create_batch(&ops); // id = 1
+    let result = cl.try_execute_batch(&id);
+
+    // Reentrant attempt is blocked by Executing status → trigger returns
+    // Err → propagate as OperationFailed.
+    assert!(result.is_err());
+
+    // Soroban rollback restores batch to Pending.
+    let stored = cl.get_batch_status(&id);
+    assert_eq!(stored.status, BatchStatus::Pending);
 }
 
 #[test]
@@ -355,6 +420,13 @@ fn cancel_pending_batch_transitions_to_failed() {
     let id = cl.create_batch(&ops);
 
     cl.cancel_batch(&id);
+
+    // BatchCancelled event emitted
+    assert_ne!(
+        env.events().all(),
+        vec![&env],
+        "BatchCancelled event expected"
+    );
 
     let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Failed);
