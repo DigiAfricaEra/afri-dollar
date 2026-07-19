@@ -18,6 +18,18 @@ function validateJwtSecrets(): void {
   }
 }
 
+function assertUserEligible(user: { isActive: boolean; status: string }): void {
+  if (!user.isActive || user.status === 'suspended' || user.status === 'banned') {
+    const reason =
+      user.status === 'banned'
+        ? 'Account is banned'
+        : user.status === 'suspended'
+          ? 'Account is suspended'
+          : 'Account is inactive';
+    throw new AppError(403, reason);
+  }
+}
+
 export const AuthService = {
   async hashPassword(password: string): Promise<string> {
     return hash(password, SALT_ROUNDS);
@@ -135,9 +147,7 @@ export const AuthService = {
       throw new AppError(401, 'Invalid credentials');
     }
 
-    if (!user.isActive) {
-      throw new AppError(403, 'Account is inactive');
-    }
+    assertUserEligible(user);
 
     const jwtPayload: Omit<JwtPayload, 'iat' | 'exp'> = {
       userId: user.id,
@@ -147,18 +157,25 @@ export const AuthService = {
 
     const accessToken = this.generateAccessToken(jwtPayload);
     const refreshToken = this.generateRefreshToken(jwtPayload);
+    const loggedInAt = new Date();
 
-    await prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        tokenHash: this.hashRefreshToken(refreshToken),
-        deviceInfo: deviceInfo ?? null,
-        expiresAt: addDays(new Date(), REFRESH_TOKEN_EXPIRY_DAYS),
-      },
-    });
+    const [, updatedUser] = await prisma.$transaction([
+      prisma.refreshToken.create({
+        data: {
+          userId: user.id,
+          tokenHash: this.hashRefreshToken(refreshToken),
+          deviceInfo: deviceInfo ?? null,
+          expiresAt: addDays(loggedInAt, REFRESH_TOKEN_EXPIRY_DAYS),
+        },
+      }),
+      prisma.user.update({
+        where: { id: user.id },
+        data: { lastLoginAt: loggedInAt },
+      }),
+    ]);
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { passwordHash: _pw, ...userWithoutPassword } = user;
+    const { passwordHash: _pw, ...userWithoutPassword } = updatedUser;
 
     return {
       user: userWithoutPassword,
@@ -199,9 +216,7 @@ export const AuthService = {
       throw new AppError(401, 'Refresh token has expired');
     }
 
-    if (!tokenRecord.user.isActive) {
-      throw new AppError(403, 'Account is inactive');
-    }
+    assertUserEligible(tokenRecord.user);
 
     // Rotate: revoke the current token
     await prisma.refreshToken.update({

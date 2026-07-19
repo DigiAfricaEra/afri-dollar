@@ -3,12 +3,13 @@ import { z } from 'zod';
 
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { AuditService } from '../services/audit.service';
+import { queryBooleanSchema } from '../utils/validation';
 
 const auditLogQuerySchema = z.object({
   userId: z.string().optional(),
   action: z.string().optional(),
   resource: z.string().optional(),
-  success: z.coerce.boolean().optional(),
+  success: queryBooleanSchema,
   startDate: z.string().datetime().optional(),
   endDate: z.string().datetime().optional(),
   page: z.coerce.number().int().positive().default(1),
