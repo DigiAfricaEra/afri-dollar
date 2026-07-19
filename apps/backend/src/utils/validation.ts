@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+/** Parse query-string booleans safely (`"false"` must not become `true`). */
+export const queryBooleanSchema = z
+  .enum(['true', 'false'])
+  .transform((value) => value === 'true')
+  .optional();
+
 export const loginSchema = z.object({
   email: z.string().email('Invalid email format'),
   password: z.string().min(8, 'Password must be at least 8 characters'),

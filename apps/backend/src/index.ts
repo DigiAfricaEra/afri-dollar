@@ -13,6 +13,7 @@ interface MountableRouter {
 }
 import prisma from './config/database';
 import { errorMiddleware } from './middleware/error.middleware';
+import adminRouter from './routes/admin.routes';
 import auditRouter from './routes/audit.routes';
 import authRouter from './routes/auth.routes';
 import fxRouter, { adminFxRouter } from './routes/fx.routes';
@@ -67,8 +68,11 @@ app.use('/api/v1/fx', fxRouter as MountableRouter);
 // Payment routes
 app.use('/api/v1/payments', paymentRouter as MountableRouter);
 
-// Admin FX routes
+// Admin FX routes (mounted before general admin router)
 app.use('/api/v1/admin/fx', adminFxRouter as MountableRouter);
+
+// Admin dashboard routes
+app.use('/api/v1/admin', adminRouter as MountableRouter);
 
 // Payroll routes
 app.use('/api/v1/payroll', payrollRouter as MountableRouter);

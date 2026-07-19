@@ -17,6 +17,18 @@ enum UserRole {
   AUDITOR
 }
 
+enum UserStatus {
+  active
+  suspended
+  banned
+}
+
+enum ComplianceAlertStatus {
+  open
+  resolved
+  dismissed
+}
+
 enum JobExecutionStatus {
   pending
   running
@@ -56,21 +68,25 @@ model User {
   firstName     String?
   lastName      String?
   role          UserRole    @default(USER)
+  status        UserStatus  @default(active)
   isVerified    Boolean     @default(false)
   isActive      Boolean     @default(true)
+  lastLoginAt   DateTime?
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 
   // Relations
-  business        Business?
-  wallets         Wallet[]
-  transactions    Transaction[]
-  kycRecords      KYCRecord[]
-  refreshTokens   RefreshToken[]
-  reportRequests  ReportRequest[]
+  business          Business?
+  wallets           Wallet[]
+  transactions      Transaction[]
+  kycRecords        KYCRecord[]
+  refreshTokens     RefreshToken[]
+  reportRequests    ReportRequest[]
+  complianceAlerts  ComplianceAlert[]
 
   @@index([email])
   @@index([walletAddress])
+  @@index([status])
 }
 
 // Business model for enterprise customers
@@ -160,15 +176,23 @@ model Transaction {
   
   metadata        Json?
   errorMessage    String?
+  isFlagged       Boolean  @default(false)
+  flagReason      String?
+  flaggedAt       DateTime?
+  flaggedBy       String?
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   completedAt     DateTime?
 
+  // Relations
+  complianceAlerts ComplianceAlert[]
+
   @@index([userId])
   @@index([walletId])
   @@index([status])
   @@index([stellarTxId])
+  @@index([isFlagged])
 }
 
 // KYC records for compliance
@@ -360,4 +384,42 @@ model ReportTemplate {
   schedule        String?
 
   @@index([reportType])
+}
+
+// Compliance alerts for admin dashboard monitoring
+model ComplianceAlert {
+  id              String                @id @default(cuid())
+  type            String                // 'kyc', 'sanctions', 'travel_rule', 'aml', etc.
+  severity        String                @default("medium") // 'low', 'medium', 'high', 'critical'
+  status          ComplianceAlertStatus @default(open)
+  title           String
+  description     String?
+  userId          String?
+  user            User?                 @relation(fields: [userId], references: [id], onDelete: SetNull)
+  transactionId   String?
+  transaction     Transaction?          @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  metadata        Json?
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  resolutionNote  String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@index([status])
+  @@index([severity])
+  @@index([type])
+  @@index([userId])
+  @@index([transactionId])
+  @@index([createdAt])
+}
+
+// Platform configuration key/value store
+model SystemConfig {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       Json
+  description String?
+  updatedBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
