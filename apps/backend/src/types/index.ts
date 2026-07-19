@@ -6,6 +6,7 @@ export * from './wallet.types';
 export * from './security.types';
 export * from './job.types';
 export * from './report.type';
+export * from './admin.types';
 
 export type RegisterRequest = {
   email: string;
