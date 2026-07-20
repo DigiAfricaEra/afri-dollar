@@ -94,7 +94,7 @@ pub fn propose_upgrade(
     new_wasm_hash: BytesN<32>,
     delay_ledgers: u64,
 ) -> Result<u64, Error> {
-    let admin: Address = env
+    proposer.require_auth(); let admin: Address = env
         .storage()
         .instance()
         .get(&UpgradeDataKey::Admin)
@@ -211,7 +211,7 @@ pub fn cancel_upgrade(env: &Env, proposal_id: u64) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn rollback_upgrade(env: &Env, admin: &Address) -> Result<(), Error> {
+pub fn rollback_upgrade(env: &Env, admin: &Address) { admin.require_auth(); -> Result<(), Error> {
     let stored_admin: Address = env
         .storage()
         .instance()
