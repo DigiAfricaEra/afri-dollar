@@ -22,7 +22,6 @@ pub enum Error {
     EmptyBatch = 4,
     BatchAlreadyExecuted = 5,
     NotRolledBack = 6,
-    InvalidInput = 7,
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +56,6 @@ pub struct BatchOperation {
     pub created_at: u64,
     pub executed_at: Option<u64>,
     pub gas_used: Option<u64>,
-    pub creator: Address,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,29 +117,16 @@ fn put_batch(env: &Env, batch: &BatchOperation) {
         .set(&DataKey::Batch(batch.id), batch);
 }
 
-fn string_to_symbol(env: &Env, s: &soroban_sdk::String) -> Result<Symbol, Error> {
+fn string_to_symbol(env: &Env, s: &soroban_sdk::String) -> Symbol {
     let bytes = s.to_bytes();
     let len = bytes.len();
-
-    if len == 0 {
-        return Err(Error::InvalidInput);
-    }
-    if len > 32 {
-        return Err(Error::InvalidInput);
-    }
-
+    let copy_len = len.min(32);
     let mut buf = [0u8; 32];
-    bytes.copy_into_slice(&mut buf[..len as usize]);
-
-    let name = core::str::from_utf8(&buf[..len as usize]).map_err(|_| Error::InvalidInput)?;
-
-    for byte in name.bytes() {
-        if !(byte.is_ascii_alphanumeric() || byte == b'_') {
-            return Err(Error::InvalidInput);
-        }
-    }
-
-    Ok(Symbol::new(env, name))
+    bytes
+        .slice(0..copy_len)
+        .copy_into_slice(&mut buf[..copy_len as usize]);
+    let s = core::str::from_utf8(&buf[..copy_len as usize]).unwrap_or("");
+    Symbol::new(env, s)
 }
 
 fn extend_batch_ttl(env: &Env, batch_id: u64) {
@@ -169,9 +154,6 @@ impl BatchExecutor {
             return Err(Error::EmptyBatch);
         }
 
-        let invoker = env.invoker();
-        invoker.require_auth();
-
         let next_id: u64 = env
             .storage()
             .instance()
@@ -185,7 +167,6 @@ impl BatchExecutor {
             created_at: env.ledger().timestamp(),
             executed_at: None,
             gas_used: None,
-            creator: invoker,
         };
 
         put_batch(&env, &batch);
@@ -217,8 +198,6 @@ impl BatchExecutor {
     pub fn execute_batch(env: Env, batch_id: u64) -> Result<(), Error> {
         let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
 
-        batch.creator.require_auth();
-
         if batch.status != BatchStatus::Pending {
             return Err(Error::InvalidBatchState);
         }
@@ -231,7 +210,7 @@ impl BatchExecutor {
         put_batch(&env, &batch);
 
         for op in batch.operations.iter() {
-            let fn_name = string_to_symbol(&env, &op.function_name)?;
+            let fn_name = string_to_symbol(&env, &op.function_name);
             let result = env.try_invoke_contract::<Val, soroban_sdk::Error>(
                 &op.contract_id,
                 &fn_name,
@@ -287,19 +266,19 @@ impl BatchExecutor {
     }
 
     /// Read the full `BatchOperation` for `batch_id`.
-    pub fn get_batch_status(env: Env, batch_id: u64) -> Result<BatchOperation, Error> {
-        read_batch(&env, batch_id).ok_or(Error::BatchNotFound)
+    /// Panics if the batch does not exist.
+    pub fn get_batch_status(env: Env, batch_id: u64) -> BatchOperation {
+        read_batch(&env, batch_id).expect("batch not found")
     }
 
     /// Cancel a pending batch.
     /// Transitions `Pending` → `Failed`.
-    pub fn cancel_batch(env: Env, batch_id: u64) -> Result<(), Error> {
-        let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
-
-        batch.creator.require_auth();
+    /// Does nothing if the batch is already in a terminal state.
+    pub fn cancel_batch(env: Env, batch_id: u64) {
+        let mut batch = read_batch(&env, batch_id).expect("batch not found");
 
         if batch.status != BatchStatus::Pending {
-            return Err(Error::InvalidBatchState);
+            panic!("batch not in pending state");
         }
 
         batch.status = BatchStatus::Failed;
@@ -308,8 +287,6 @@ impl BatchExecutor {
         extend_instance_ttl(&env);
 
         BatchCancelled { batch_id }.publish(&env);
-
-        Ok(())
     }
 
     /// Roll back a partially-executed batch.
@@ -326,13 +303,11 @@ impl BatchExecutor {
     /// so `Partial` status is unreachable via normal execution. This
     /// function is preserved for API compatibility and future use where
     /// application-level partial states may be introduced.
-    pub fn rollback_batch(env: Env, batch_id: u64) -> Result<(), Error> {
-        let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
-
-        batch.creator.require_auth();
+    pub fn rollback_batch(env: Env, batch_id: u64) {
+        let mut batch = read_batch(&env, batch_id).expect("batch not found");
 
         if batch.status != BatchStatus::Partial {
-            return Err(Error::InvalidBatchState);
+            panic!("batch not in partial state");
         }
 
         batch.status = BatchStatus::RolledBack;
@@ -341,8 +316,6 @@ impl BatchExecutor {
         extend_instance_ttl(&env);
 
         BatchRolledBack { batch_id }.publish(&env);
-
-        Ok(())
     }
 }
 
