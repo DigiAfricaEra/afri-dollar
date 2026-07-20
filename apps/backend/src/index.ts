@@ -5,6 +5,8 @@ import cors from 'cors';
 import { config } from 'dotenv';
 import express, { json, urlencoded } from 'express';
 import helmet from 'helmet';
+import swaggerJsdoc from 'swagger-jsdoc';
+import swaggerUi from 'swagger-ui-express';
 
 // Express's RequestHandler uses `any` as default generic params, which triggers
 // @typescript-eslint/no-unsafe-argument. This interface provides non-any types.
@@ -12,6 +14,7 @@ interface MountableRouter {
   (req: express.Request, res: express.Response, next: express.NextFunction): void;
 }
 import prisma from './config/database';
+import swaggerOptions from './config/swagger';
 import { errorMiddleware } from './middleware/error.middleware';
 import adminRouter from './routes/admin.routes';
 import auditRouter from './routes/audit.routes';
@@ -38,6 +41,18 @@ let httpServer: Server | null = null;
 // Export prisma for easy access
 export { prisma };
 export { app };
+
+// Swagger/OpenAPI documentation — mounted before Helmet so Swagger UI's
+// inline scripts and styles are not blocked by the default CSP.
+// Gated behind NODE_ENV so the docs endpoints are not exposed in production.
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
+
+if (process.env.NODE_ENV !== 'production') {
+  app.get('/api/v1/docs.json', (_req, res) => {
+    res.json(swaggerSpec);
+  });
+  app.use('/api/v1/docs', swaggerUi.serveFiles(swaggerSpec), swaggerUi.setup(swaggerSpec));
+}
 
 // Middleware
 app.use(helmet());
