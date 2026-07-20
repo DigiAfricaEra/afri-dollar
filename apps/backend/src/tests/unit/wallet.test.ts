@@ -8,6 +8,12 @@ import { encrypt } from '../../utils/crypto';
 const mockPublicKey = 'GABC12345...';
 const mockSecretKey = 'SABC12345...';
 
+jest.mock('../../services/webhook.service', () => ({
+  WebhookService: {
+    emitEvent: jest.fn(),
+  },
+}));
+
 jest.mock('../../config/database', () => ({
   __esModule: true,
   default: {

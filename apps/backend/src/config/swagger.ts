@@ -45,6 +45,7 @@ const swaggerOptions: Options = {
       { name: 'Security', description: 'IP security metrics and blocking (admin only)' },
       { name: 'Jobs', description: 'Background job monitoring (admin only)' },
       { name: 'Reports', description: 'Report generation and templates' },
+      { name: 'Webhooks', description: 'Webhook event subscription and delivery management' },
     ],
     components: {
       securitySchemes: {
@@ -75,6 +76,38 @@ const swaggerOptions: Options = {
                 message: { type: 'string' },
               },
             },
+          },
+        },
+        WebhookConfig: {
+          type: 'object',
+          properties: {
+            id: { type: 'string', example: 'wh_abc123' },
+            userId: { type: 'string' },
+            url: { type: 'string', format: 'uri', example: 'https://example.com/hook' },
+            events: { type: 'array', items: { type: 'string' } },
+            active: { type: 'boolean', example: true },
+            headers: { type: 'object', additionalProperties: { type: 'string' } },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
+          },
+        },
+        WebhookDelivery: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            webhookId: { type: 'string' },
+            eventType: { type: 'string', example: 'transaction.completed' },
+            payload: { type: 'object' },
+            statusCode: { type: 'integer' },
+            response: { type: 'string' },
+            error: { type: 'string' },
+            attemptCount: { type: 'integer' },
+            maxAttempts: { type: 'integer' },
+            status: { type: 'string', enum: ['pending', 'delivered', 'failed', 'retrying'] },
+            nextRetryAt: { type: 'string', format: 'date-time' },
+            deliveredAt: { type: 'string', format: 'date-time' },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' },
           },
         },
       },
@@ -2493,6 +2526,302 @@ const swaggerOptions: Options = {
             '401': { description: 'Unauthorized' },
             '403': { description: 'Admin privileges required' },
             '404': { description: 'Job not found' },
+          },
+        },
+      },
+
+      // ─── Webhooks ──────────────────────────────────────────────────
+      '/api/v1/webhooks': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Create a webhook',
+          description: 'Registers a new webhook endpoint to receive event notifications',
+          operationId: 'createWebhook',
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['url', 'events'],
+                  properties: {
+                    url: { type: 'string', format: 'uri', example: 'https://example.com/hook' },
+                    events: {
+                      type: 'array',
+                      minItems: 1,
+                      items: {
+                        type: 'string',
+                        enum: [
+                          'transaction.completed',
+                          'transaction.failed',
+                          'wallet.created',
+                          'payroll.processed',
+                          'kyc.approved',
+                          'kyc.rejected',
+                        ],
+                      },
+                      example: ['transaction.completed'],
+                    },
+                    headers: {
+                      type: 'object',
+                      additionalProperties: { type: 'string' },
+                      description: 'Optional custom headers sent with each delivery',
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            '201': {
+              description: 'Webhook created',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/SuccessResponse' },
+                      {
+                        type: 'object',
+                        properties: { data: { $ref: '#/components/schemas/WebhookConfig' } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            '400': { description: 'Validation error' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+        get: {
+          tags: ['Webhooks'],
+          summary: 'List webhooks',
+          description: 'Returns all webhooks for the authenticated user',
+          operationId: 'listWebhooks',
+          security: [{ bearerAuth: [] }],
+          responses: {
+            '200': {
+              description: 'List of webhooks',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/SuccessResponse' },
+                      {
+                        type: 'object',
+                        properties: {
+                          data: {
+                            type: 'array',
+                            items: { $ref: '#/components/schemas/WebhookConfig' },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/api/v1/webhooks/{id}': {
+        get: {
+          tags: ['Webhooks'],
+          summary: 'Get webhook details',
+          description: 'Returns details for a specific webhook',
+          operationId: 'getWebhook',
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Webhook ID',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'Webhook details',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/SuccessResponse' },
+                      {
+                        type: 'object',
+                        properties: { data: { $ref: '#/components/schemas/WebhookConfig' } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            '401': { description: 'Unauthorized' },
+            '404': { description: 'Webhook not found' },
+          },
+        },
+        delete: {
+          tags: ['Webhooks'],
+          summary: 'Delete a webhook',
+          description: 'Permanently deletes a webhook and its delivery history',
+          operationId: 'deleteWebhook',
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Webhook ID',
+            },
+          ],
+          responses: {
+            '200': { description: 'Webhook deleted' },
+            '401': { description: 'Unauthorized' },
+            '404': { description: 'Webhook not found' },
+          },
+        },
+      },
+      '/api/v1/webhooks/{id}/toggle': {
+        patch: {
+          tags: ['Webhooks'],
+          summary: 'Toggle webhook enabled state',
+          description: 'Enables or disables a webhook without deleting it',
+          operationId: 'toggleWebhook',
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Webhook ID',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'Webhook toggled',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/SuccessResponse' },
+                      {
+                        type: 'object',
+                        properties: { data: { $ref: '#/components/schemas/WebhookConfig' } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            '401': { description: 'Unauthorized' },
+            '404': { description: 'Webhook not found' },
+          },
+        },
+      },
+      '/api/v1/webhooks/{id}/test': {
+        post: {
+          tags: ['Webhooks'],
+          summary: 'Send test webhook delivery',
+          description: 'Sends a test event to the webhook endpoint to verify connectivity',
+          operationId: 'testWebhook',
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Webhook ID',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'Test delivery result',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/SuccessResponse' },
+                      {
+                        type: 'object',
+                        properties: { data: { $ref: '#/components/schemas/WebhookDelivery' } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            '401': { description: 'Unauthorized' },
+            '404': { description: 'Webhook not found' },
+          },
+        },
+      },
+      '/api/v1/webhooks/{id}/deliveries': {
+        get: {
+          tags: ['Webhooks'],
+          summary: 'List webhook deliveries',
+          description: 'Returns delivery history for a specific webhook',
+          operationId: 'getWebhookDeliveries',
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'path',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Webhook ID',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              required: false,
+              schema: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+            },
+            {
+              name: 'cursor',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description: 'Pagination cursor',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'Delivery history',
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { $ref: '#/components/schemas/SuccessResponse' },
+                      {
+                        type: 'object',
+                        properties: {
+                          data: {
+                            type: 'array',
+                            items: { $ref: '#/components/schemas/WebhookDelivery' },
+                          },
+                          pagination: {
+                            type: 'object',
+                            properties: {
+                              total: { type: 'integer' },
+                              limit: { type: 'integer' },
+                              hasMore: { type: 'boolean' },
+                            },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+            '401': { description: 'Unauthorized' },
+            '404': { description: 'Webhook not found' },
           },
         },
       },
