@@ -4,8 +4,8 @@ use afri_contract_shared::{
     extend_instance_ttl, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
 };
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String,
-    Symbol, Val, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, Env, String, Symbol, Val,
+    Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,6 @@ pub struct BatchOperation {
     pub created_at: u64,
     pub executed_at: Option<u64>,
     pub gas_used: Option<u64>,
-    pub creator: Address,
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +168,6 @@ impl BatchExecutor {
             return Err(Error::EmptyBatch);
         }
 
-        let invoker = env.invoker();
-        invoker.require_auth();
-
         let next_id: u64 = env
             .storage()
             .instance()
@@ -185,7 +181,6 @@ impl BatchExecutor {
             created_at: env.ledger().timestamp(),
             executed_at: None,
             gas_used: None,
-            creator: invoker,
         };
 
         put_batch(&env, &batch);
@@ -216,8 +211,6 @@ impl BatchExecutor {
     /// without performing any work.
     pub fn execute_batch(env: Env, batch_id: u64) -> Result<(), Error> {
         let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
-
-        batch.creator.require_auth();
 
         if batch.status != BatchStatus::Pending {
             return Err(Error::InvalidBatchState);
@@ -296,8 +289,6 @@ impl BatchExecutor {
     pub fn cancel_batch(env: Env, batch_id: u64) -> Result<(), Error> {
         let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
 
-        batch.creator.require_auth();
-
         if batch.status != BatchStatus::Pending {
             return Err(Error::InvalidBatchState);
         }
@@ -328,8 +319,6 @@ impl BatchExecutor {
     /// application-level partial states may be introduced.
     pub fn rollback_batch(env: Env, batch_id: u64) -> Result<(), Error> {
         let mut batch = read_batch(&env, batch_id).ok_or(Error::BatchNotFound)?;
-
-        batch.creator.require_auth();
 
         if batch.status != BatchStatus::Partial {
             return Err(Error::InvalidBatchState);
