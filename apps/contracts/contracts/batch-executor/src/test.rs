@@ -167,7 +167,7 @@ fn execute_batch_all_operations_succeed() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 100)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id);
+    cl.execute_batch(&id).unwrap();
 
     // BatchExecuted event emitted
     assert_ne!(
@@ -238,7 +238,7 @@ fn execute_batch_twice_rejected() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 50)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id);
+    cl.execute_batch(&id).unwrap();
 
     let result = cl.try_execute_batch(&id);
     assert!(
@@ -269,7 +269,7 @@ fn execute_batch_rejects_non_pending_state() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 10)]);
     let id = cl.create_batch(&ops);
 
-    cl.cancel_batch(&id);
+    cl.cancel_batch(&id).unwrap();
 
     let result = cl.try_execute_batch(&id);
     assert!(
@@ -443,7 +443,7 @@ fn cancel_completed_batch_returns_error() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 10)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id);
+    cl.execute_batch(&id).unwrap();
 
     let result = cl.try_cancel_batch(&id);
     assert!(result.is_err(), "canceling executed batch should error");
@@ -480,7 +480,7 @@ fn rollback_completed_batch_returns_error() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 10)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id);
+    cl.execute_batch(&id).unwrap();
 
     let result = cl.try_rollback_batch(&id);
     assert!(result.is_err(), "rollback on completed batch should error");
@@ -524,7 +524,7 @@ fn lifecycle_pending_to_completed() {
         BatchStatus::Pending
     );
 
-    cl.execute_batch(&id);
+    cl.execute_batch(&id).unwrap();
 
     assert_eq!(
         cl.get_batch_status(&id).unwrap().status,
@@ -593,7 +593,7 @@ fn lifecycle_failed_execute_rolls_back_to_pending() {
     // (This proves the rollback fully reset the state.)
     let success_ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 200)]);
     let id2 = cl.create_batch(&success_ops);
-    cl.execute_batch(&id2);
+    cl.execute_batch(&id2).unwrap();
     assert_eq!(
         cl.get_batch_status(&id2).unwrap().status,
         BatchStatus::Completed
