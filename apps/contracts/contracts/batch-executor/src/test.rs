@@ -519,11 +519,17 @@ fn lifecycle_pending_to_completed() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 555)]);
     let id = cl.create_batch(&ops);
 
-    assert_eq!(cl.get_batch_status(&id).unwrap().status, BatchStatus::Pending);
+    assert_eq!(
+        cl.get_batch_status(&id).unwrap().status,
+        BatchStatus::Pending
+    );
 
     cl.execute_batch(&id);
 
-    assert_eq!(cl.get_batch_status(&id).unwrap().status, BatchStatus::Completed);
+    assert_eq!(
+        cl.get_batch_status(&id).unwrap().status,
+        BatchStatus::Completed
+    );
     assert_eq!(callee_client.read(), 555);
 }
 
@@ -539,11 +545,17 @@ fn lifecycle_pending_to_failed() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 555)]);
     let id = cl.create_batch(&ops);
 
-    assert_eq!(cl.get_batch_status(&id).unwrap().status, BatchStatus::Pending);
+    assert_eq!(
+        cl.get_batch_status(&id).unwrap().status,
+        BatchStatus::Pending
+    );
 
     cl.cancel_batch(&id).unwrap();
 
-    assert_eq!(cl.get_batch_status(&id).unwrap().status, BatchStatus::Failed);
+    assert_eq!(
+        cl.get_batch_status(&id).unwrap().status,
+        BatchStatus::Failed
+    );
 }
 
 #[test]
@@ -564,7 +576,10 @@ fn lifecycle_failed_execute_rolls_back_to_pending() {
     );
     let id = cl.create_batch(&ops);
 
-    assert_eq!(cl.get_batch_status(&id).unwrap().status, BatchStatus::Pending);
+    assert_eq!(
+        cl.get_batch_status(&id).unwrap().status,
+        BatchStatus::Pending
+    );
 
     // execute_batch fails atomically — batch stays Pending.
     let result = cl.try_execute_batch(&id);
@@ -579,5 +594,8 @@ fn lifecycle_failed_execute_rolls_back_to_pending() {
     let success_ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 200)]);
     let id2 = cl.create_batch(&success_ops);
     cl.execute_batch(&id2);
-    assert_eq!(cl.get_batch_status(&id2).unwrap().status, BatchStatus::Completed);
+    assert_eq!(
+        cl.get_batch_status(&id2).unwrap().status,
+        BatchStatus::Completed
+    );
 }
