@@ -236,17 +236,13 @@ impl FXSwapContract {
         };
 
         let pool_key = DataKey::Pool(asset_0.clone(), asset_1.clone());
-        let mut pool: Pool = env
-            .storage()
-            .persistent()
-            .get(&pool_key)
-            .unwrap_or(Pool {
-                asset_a: asset_0.clone(),
-                asset_b: asset_1.clone(),
-                reserve_a: 0,
-                reserve_b: 0,
-                total_shares: 0,
-            });
+        let mut pool: Pool = env.storage().persistent().get(&pool_key).unwrap_or(Pool {
+            asset_a: asset_0.clone(),
+            asset_b: asset_1.clone(),
+            reserve_a: 0,
+            reserve_b: 0,
+            total_shares: 0,
+        });
 
         let shares_minted = if pool.total_shares == 0 {
             let product = amt_0.checked_mul(amt_1).ok_or(Error::Overflow)?;
@@ -487,11 +483,23 @@ impl FXSwapContract {
             .ok_or(Error::PoolNotFound)?;
 
         if !is_reversed {
-            pool.reserve_a = pool.reserve_a.checked_add(amount_in).ok_or(Error::Overflow)?;
-            pool.reserve_b = pool.reserve_b.checked_sub(amount_out).ok_or(Error::Overflow)?;
+            pool.reserve_a = pool
+                .reserve_a
+                .checked_add(amount_in)
+                .ok_or(Error::Overflow)?;
+            pool.reserve_b = pool
+                .reserve_b
+                .checked_sub(amount_out)
+                .ok_or(Error::Overflow)?;
         } else {
-            pool.reserve_b = pool.reserve_b.checked_add(amount_in).ok_or(Error::Overflow)?;
-            pool.reserve_a = pool.reserve_a.checked_sub(amount_out).ok_or(Error::Overflow)?;
+            pool.reserve_b = pool
+                .reserve_b
+                .checked_add(amount_in)
+                .ok_or(Error::Overflow)?;
+            pool.reserve_a = pool
+                .reserve_a
+                .checked_sub(amount_out)
+                .ok_or(Error::Overflow)?;
         }
 
         env.storage().persistent().set(&pool_key, &pool);

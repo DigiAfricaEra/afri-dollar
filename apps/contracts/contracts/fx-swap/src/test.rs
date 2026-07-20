@@ -135,12 +135,8 @@ fn test_add_and_remove_liquidity() {
     );
 
     // Remove half of liquidity (10,000 shares)
-    let (returned_a, returned_b) = client.remove_liquidity(
-        &fixture.lp,
-        &fixture.asset_a,
-        &fixture.asset_b,
-        &10_000,
-    );
+    let (returned_a, returned_b) =
+        client.remove_liquidity(&fixture.lp, &fixture.asset_a, &fixture.asset_b, &10_000);
 
     assert_eq!(returned_a, 5_000);
     assert_eq!(returned_b, 20_000);
@@ -240,13 +236,7 @@ fn test_identical_assets_rejected() {
     client.initialize(&fixture.admin);
 
     assert_eq!(
-        client.try_add_liquidity(
-            &fixture.lp,
-            &fixture.asset_a,
-            &100,
-            &fixture.asset_a,
-            &100
-        ),
+        client.try_add_liquidity(&fixture.lp, &fixture.asset_a, &100, &fixture.asset_a, &100),
         Err(Ok(Error::IdenticalAssets))
     );
 }
