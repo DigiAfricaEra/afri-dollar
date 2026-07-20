@@ -433,7 +433,7 @@ fn cancel_pending_batch_transitions_to_failed() {
 }
 
 #[test]
-fn cancel_completed_batch_panics() {
+fn cancel_completed_batch_returns_error() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -446,11 +446,11 @@ fn cancel_completed_batch_panics() {
     cl.execute_batch(&id);
 
     let result = cl.try_cancel_batch(&id);
-    assert!(result.is_err(), "canceling executed batch should panic");
+    assert!(result.is_err(), "canceling executed batch should error");
 }
 
 #[test]
-fn cancel_nonexistent_batch_panics() {
+fn cancel_nonexistent_batch_returns_error() {
     let env = Env::default();
     let executor_id = register_executor(&env);
     let cl = client(&env, &executor_id);
@@ -470,7 +470,7 @@ fn cancel_nonexistent_batch_panics() {
 // its error-path behavior is covered by the Pending and Completed tests below.
 
 #[test]
-fn rollback_completed_batch_panics() {
+fn rollback_completed_batch_returns_error() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -483,11 +483,11 @@ fn rollback_completed_batch_panics() {
     cl.execute_batch(&id);
 
     let result = cl.try_rollback_batch(&id);
-    assert!(result.is_err(), "rollback on completed batch should panic");
+    assert!(result.is_err(), "rollback on completed batch should error");
 }
 
 #[test]
-fn rollback_pending_batch_panics() {
+fn rollback_pending_batch_returns_error() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -499,7 +499,7 @@ fn rollback_pending_batch_panics() {
     let id = cl.create_batch(&ops);
 
     let result = cl.try_rollback_batch(&id);
-    assert!(result.is_err(), "rollback on pending batch should panic");
+    assert!(result.is_err(), "rollback on pending batch should error");
 }
 
 // ===========================================================================
