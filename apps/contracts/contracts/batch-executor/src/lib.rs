@@ -4,8 +4,8 @@ use afri_contract_shared::{
     extend_instance_ttl, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
 };
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, Env, String, Symbol, Val,
-    Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, Address, Env, String,
+    Symbol, Val, Vec,
 };
 
 // ---------------------------------------------------------------------------
