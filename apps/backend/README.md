@@ -172,6 +172,13 @@ The API will be available at `http://localhost:3001`
 - Development: `http://localhost:3001`
 - Production: `https://api.afridollar.com`
 
+### Swagger / OpenAPI
+
+Interactive API documentation is available at:
+
+- **Swagger UI**: `http://localhost:3001/api/v1/docs`
+- **OpenAPI JSON**: `http://localhost:3001/api/v1/docs.json`
+
 ### Authentication
 
 Most endpoints require authentication via JWT token in the Authorization header:
@@ -180,7 +187,7 @@ Most endpoints require authentication via JWT token in the Authorization header:
 Authorization: Bearer <jwt_token>
 ```
 
-### Core Endpoints
+### Implemented Endpoints
 
 #### Health & Info
 
@@ -191,60 +198,103 @@ Authorization: Bearer <jwt_token>
 
 - `POST /api/v1/auth/register` - Register new user
 - `POST /api/v1/auth/login` - User login
-- `POST /api/v1/auth/logout` - User logout
+- `POST /api/v1/auth/logout` - User logout (requires auth)
 - `POST /api/v1/auth/refresh` - Refresh JWT token
-- `GET /api/v1/auth/me` - Get current user info
+- `GET /api/v1/auth/me` - Get current user info (requires auth)
 
-#### Security
+#### FX Conversion
 
-- `GET /api/v1/security/metrics` - View blocked and flagged IP metrics
-- `GET /api/v1/security/blocked-ips` - List currently blocked IPs
-- `GET /api/v1/security/flagged-ips` - List flagged IPs and failed attempts
+- `GET /api/v1/fx/rates` - Get current FX rates
+- `POST /api/v1/fx/quote` - Get FX quote
+- `POST /api/v1/fx/convert` - Execute FX conversion (requires auth)
+- `GET /api/v1/fx/history` - Get conversion history (requires auth)
 
-#### Wallet Management
+#### Cross-Border Payments
 
-- `POST /api/v1/wallet/create` - Create new Stellar wallet
-- `GET /api/v1/wallet/:id` - Get wallet details
-- `GET /api/v1/wallet/:id/balance` - Get wallet balance
-- `GET /api/v1/wallet/:id/transactions` - Get wallet transaction history
-- `POST /api/v1/wallet/:id/fund` - Fund wallet with USDC
-- `POST /api/v1/wallet/:id/withdraw` - Withdraw from wallet
+- `POST /api/v1/payments` - Create cross-border payment (requires auth)
+- `POST /api/v1/payments/:id/process` - Process a payment (requires auth)
+- `GET /api/v1/payments/:id/status` - Get payment status (requires auth)
+- `GET /api/v1/payments/history` - Get payment history (requires auth)
+- `POST /api/v1/payments/:id/cancel` - Cancel payment (requires auth)
 
-#### Treasury Management
+#### Payroll
+
+- `POST /api/v1/payroll/batches` - Create payroll batch (requires auth)
+- `GET /api/v1/payroll/batches` - List payroll batches (requires auth)
+- `GET /api/v1/payroll/batches/:id` - Get payroll batch details (requires auth)
+- `POST /api/v1/payroll/batches/:id/items` - Add item to batch (requires auth)
+- `POST /api/v1/payroll/batches/:id/approve` - Approve payroll batch (requires auth)
+- `POST /api/v1/payroll/batches/:id/process` - Process payroll batch (requires auth)
+- `GET /api/v1/payroll/history` - Get payroll history (requires auth)
+
+#### Stellar
+
+- `GET /api/v1/stellar/balances/:publicKey` - Get Stellar account balances (requires auth)
+- `GET /api/v1/stellar/transactions/:publicKey` - Get Stellar transaction history (requires auth)
+- `POST /api/v1/stellar/fund/:publicKey` - Fund testnet account (requires auth)
+
+#### Treasury (admin only)
 
 - `GET /api/v1/treasury/balance` - Get treasury balance
 - `GET /api/v1/treasury/positions` - Get treasury positions
 - `POST /api/v1/treasury/rebalance` - Rebalance treasury
 - `GET /api/v1/treasury/history` - Get treasury operations history
 
-#### FX Conversion
+#### Audit (admin only)
 
-- `GET /api/v1/fx/rates` - Get current FX rates
-- `POST /api/v1/fx/quote` - Get FX quote
-- `POST /api/v1/fx/convert` - Execute FX conversion
-- `GET /api/v1/fx/history` - Get conversion history
+- `GET /api/v1/audit/logs` - Query audit logs
 
-#### Payroll
+#### Wallet
 
-- `POST /api/v1/payroll/create` - Create payroll batch
-- `GET /api/v1/payroll/:id` - Get payroll details
-- `POST /api/v1/payroll/:id/approve` - Approve payroll
-- `POST /api/v1/payroll/:id/process` - Process payroll
-- `GET /api/v1/payroll/history` - Get payroll history
+- `POST /api/v1/wallet/create` - Create new Stellar wallet (requires auth)
 
-#### Cross-Border Payments
+#### Admin FX (admin only)
 
-- `POST /api/v1/payments/send` - Send cross-border payment
-- `GET /api/v1/payments/:id` - Get payment details
-- `GET /api/v1/payments/:id/status` - Get payment status
-- `POST /api/v1/payments/:id/cancel` - Cancel payment
+- `POST /api/v1/admin/fx/rates` - Upsert exchange rate
+- `DELETE /api/v1/admin/fx/rates/:id` - Deactivate exchange rate
 
-#### Compliance
+#### Admin Dashboard (admin only)
 
-- `POST /api/v1/compliance/kyc` - Submit KYC verification
-- `GET /api/v1/compliance/kyc/:id` - Get KYC status
-- `POST /api/v1/compliance/aml-check` - Run AML check
-- `GET /api/v1/compliance/transactions` - Get flagged transactions
+- `GET /api/v1/admin/users` - List users
+- `GET /api/v1/admin/users/:id` - Get user details
+- `PUT /api/v1/admin/users/:id/status` - Update user status
+- `GET /api/v1/admin/users/:id/activity` - Get user activity
+- `GET /api/v1/admin/transactions` - List transactions
+- `GET /api/v1/admin/transactions/alerts` - Get transaction alerts
+- `GET /api/v1/admin/transactions/:id` - Get transaction details
+- `POST /api/v1/admin/transactions/:id/flag` - Flag a transaction
+- `GET /api/v1/admin/compliance/alerts` - List compliance alerts
+- `PUT /api/v1/admin/compliance/alerts/:id` - Resolve compliance alert
+- `GET /api/v1/admin/compliance/reports` - Get compliance reports
+- `GET /api/v1/admin/health` - System health
+- `GET /api/v1/admin/metrics` - Performance metrics
+- `GET /api/v1/admin/logs` - System logs
+- `GET /api/v1/admin/config` - Get platform config
+- `PUT /api/v1/admin/config` - Update platform config
+- `GET /api/v1/admin/config/audit` - Config audit trail
+
+#### Security (admin only)
+
+- `GET /api/v1/security/metrics` - View blocked and flagged IP metrics
+- `GET /api/v1/security/blocked-ips` - List currently blocked IPs
+- `GET /api/v1/security/flagged-ips` - List flagged IPs and failed attempts
+
+#### Jobs (admin only)
+
+- `GET /api/v1/jobs` - List jobs
+- `GET /api/v1/jobs/:id` - Get job execution details
+
+#### Reports
+
+- `POST /api/v1/reports` - Generate report (requires auth)
+- `GET /api/v1/reports` - List reports (requires auth)
+- `GET /api/v1/reports/:id` - Get report details (requires auth)
+- `GET /api/v1/reports/:id/download` - Download report (requires auth)
+- `GET /api/v1/reports/templates` - List report templates (admin only)
+- `POST /api/v1/reports/templates` - Create report template (admin only)
+- `GET /api/v1/reports/templates/:templateId` - Get template (admin only)
+- `PUT /api/v1/reports/templates/:templateId` - Update template (admin only)
+- `DELETE /api/v1/reports/templates/:templateId` - Delete template (admin only)
 
 ### API Response Format
 
