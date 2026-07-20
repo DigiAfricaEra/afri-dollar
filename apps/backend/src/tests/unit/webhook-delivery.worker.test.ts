@@ -218,7 +218,7 @@ describe('WebhookService.processDelivery', () => {
     jest.restoreAllMocks();
   });
 
-  it('should not retry on 400 error (non-retryable)', async () => {
+  it('should mark as failed on 400 error (non-retryable)', async () => {
     const mockDelivery = {
       id: 'del-1',
       webhookId: 'wh-1',
@@ -249,7 +249,7 @@ describe('WebhookService.processDelivery', () => {
     expect(mockWebhookDeliveryUpdate).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: 'del-1' },
-        data: expect.objectContaining({ status: 'delivered' }),
+        data: expect.objectContaining({ status: 'failed' }),
       })
     );
 

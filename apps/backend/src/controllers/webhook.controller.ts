@@ -94,6 +94,23 @@ export const WebhookController = {
     }
   },
 
+  async toggleWebhook(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+
+      const { id } = webhookIdParamSchema.parse(req.params);
+      const result = await WebhookService.toggleWebhook(id, userId);
+
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
   async deleteWebhook(req: AuthRequest, res: Response): Promise<void> {
     try {
       const userId = requireUser(req, res);

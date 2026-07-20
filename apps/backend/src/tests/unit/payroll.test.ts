@@ -31,6 +31,12 @@ const mockSubmitTransaction = (global as Record<string, unknown>)
   .__mockSubmitTransaction as jest.Mock;
 
 // Mock Prisma client
+jest.mock('../../services/webhook.service', () => ({
+  WebhookService: {
+    emitEvent: jest.fn(),
+  },
+}));
+
 jest.mock('../../config/database', () => ({
   __esModule: true,
   default: {

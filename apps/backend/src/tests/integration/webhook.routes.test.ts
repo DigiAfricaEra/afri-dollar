@@ -18,6 +18,7 @@ jest.mock('../../config/database', () => {
       create: mockFn(),
       findMany: mockFn(),
       findUnique: mockFn(),
+      update: mockFn(),
       delete: mockFn(),
     },
     webhookDelivery: {
@@ -37,6 +38,11 @@ jest.mock('../../config/database', () => {
   });
   return { __esModule: true, default: client };
 });
+
+jest.mock('../../utils/crypto', () => ({
+  encrypt: jest.fn((text: string) => `encrypted:${text}`),
+  decrypt: jest.fn((text: string) => text.replace('encrypted:', '')),
+}));
 
 describe('Webhook routes (integration)', () => {
   let server: Server;
@@ -140,6 +146,34 @@ describe('Webhook routes (integration)', () => {
       });
 
       expect(response.status).toBe(404);
+    });
+  });
+
+  describe('PATCH /api/v1/webhooks/:id/toggle', () => {
+    it('should toggle a webhook', async () => {
+      (prisma.webhookConfig.findUnique as jest.Mock).mockResolvedValue({
+        id: 'wh-1',
+        userId: 'user-1',
+        active: true,
+      });
+      (prisma.webhookConfig.update as jest.Mock).mockResolvedValue({
+        id: 'wh-1',
+        userId: 'user-1',
+        url: 'https://example.com/hook',
+        events: ['transaction.completed'],
+        active: false,
+        headers: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const response = await fetch(`${baseUrl}/api/v1/webhooks/wh-1/toggle`, {
+        method: 'PATCH',
+      });
+
+      const data = (await response.json()) as { success: boolean };
+      expect(response.status).toBe(200);
+      expect(data.success).toBe(true);
     });
   });
 

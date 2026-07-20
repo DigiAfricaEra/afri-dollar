@@ -6,7 +6,7 @@ import {
   type WebhookDeliveryJobPayload,
 } from '../types/webhook.types';
 
-import { WebhookService, createDeliveryQueue } from './webhook.service';
+import { WebhookService, getDeliveryQueue, closeDeliveryQueue } from './webhook.service';
 
 export class WebhookDeliveryWorker {
   private queue: Bull.Queue<WebhookDeliveryJobPayload> | null = null;
@@ -23,7 +23,7 @@ export class WebhookDeliveryWorker {
       return;
     }
 
-    this.queue = createDeliveryQueue();
+    this.queue = getDeliveryQueue();
     if (!this.queue) {
       this.status = 'disabled';
       return;
@@ -43,14 +43,12 @@ export class WebhookDeliveryWorker {
     );
 
     this.status = 'ready';
-    console.log('🪝 Webhook delivery worker started');
+    console.log('Webhook delivery worker started');
   }
 
   async stop(): Promise<void> {
-    if (this.queue) {
-      await this.queue.close();
-      this.queue = null;
-    }
+    this.queue = null;
+    await closeDeliveryQueue();
     this.status = 'disabled';
   }
 

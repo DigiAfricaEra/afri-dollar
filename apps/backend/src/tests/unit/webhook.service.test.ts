@@ -9,6 +9,7 @@ jest.mock('../../config/database', () => {
       create: mockFn(),
       findMany: mockFn(),
       findUnique: mockFn(),
+      update: mockFn(),
       delete: mockFn(),
     },
     webhookDelivery: {
@@ -41,6 +42,7 @@ jest.mock('../../utils/crypto', () => ({
 const mockWebhookConfigCreate = prisma.webhookConfig.create as jest.Mock;
 const mockWebhookConfigFindMany = prisma.webhookConfig.findMany as jest.Mock;
 const mockWebhookConfigFindUnique = prisma.webhookConfig.findUnique as jest.Mock;
+const mockWebhookConfigUpdate = prisma.webhookConfig.update as jest.Mock;
 const mockWebhookConfigDelete = prisma.webhookConfig.delete as jest.Mock;
 const mockWebhookDeliveryCreate = prisma.webhookDelivery.create as jest.Mock;
 const mockWebhookDeliveryFindMany = prisma.webhookDelivery.findMany as jest.Mock;
@@ -141,6 +143,53 @@ describe('WebhookService', () => {
         where: { userId: 'user-1' },
         orderBy: { createdAt: 'desc' },
       });
+    });
+  });
+
+  describe('toggleWebhook', () => {
+    it('should toggle webhook active state', async () => {
+      mockWebhookConfigFindUnique.mockResolvedValue({
+        id: 'wh-1',
+        userId: 'user-1',
+        active: true,
+      });
+      mockWebhookConfigUpdate.mockResolvedValue({
+        id: 'wh-1',
+        userId: 'user-1',
+        url: 'https://example.com/hook',
+        events: ['transaction.completed'],
+        active: false,
+        headers: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = await WebhookService.toggleWebhook('wh-1', 'user-1');
+
+      expect(result.active).toBe(false);
+      expect(mockWebhookConfigUpdate).toHaveBeenCalledWith({
+        where: { id: 'wh-1' },
+        data: { active: false },
+      });
+    });
+
+    it('should throw if webhook not found', async () => {
+      mockWebhookConfigFindUnique.mockResolvedValue(null);
+
+      await expect(WebhookService.toggleWebhook('wh-999', 'user-1')).rejects.toThrow(
+        'Webhook not found'
+      );
+    });
+
+    it('should throw if webhook belongs to different user', async () => {
+      mockWebhookConfigFindUnique.mockResolvedValue({
+        id: 'wh-1',
+        userId: 'user-2',
+      });
+
+      await expect(WebhookService.toggleWebhook('wh-1', 'user-1')).rejects.toThrow(
+        'Webhook not found'
+      );
     });
   });
 

@@ -17,6 +17,10 @@ webhookRouter.delete('/:id', authMiddleware, (req, res, next) => {
   WebhookController.deleteWebhook(req, res).catch(next);
 });
 
+webhookRouter.patch('/:id/toggle', authMiddleware, (req, res, next) => {
+  WebhookController.toggleWebhook(req, res).catch(next);
+});
+
 webhookRouter.post('/:id/test', authMiddleware, (req, res, next) => {
   WebhookController.testWebhook(req, res).catch(next);
 });

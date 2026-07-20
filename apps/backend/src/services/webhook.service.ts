@@ -78,22 +78,37 @@ function mapConfigRecord(record: {
   };
 }
 
-export function createDeliveryQueue(): Bull.Queue<WebhookDeliveryJobPayload> | null {
+let sharedDeliveryQueue: Bull.Queue<WebhookDeliveryJobPayload> | null = null;
+
+export function getDeliveryQueue(): Bull.Queue<WebhookDeliveryJobPayload> | null {
   if (!process.env.REDIS_URL) {
     return null;
   }
 
-  const queue = new Bull<WebhookDeliveryJobPayload>(WEBHOOK_DELIVERY_QUEUE, process.env.REDIS_URL, {
-    settings: {
-      retryProcessDelay: 5000,
-    },
-  });
+  if (sharedDeliveryQueue) {
+    return sharedDeliveryQueue;
+  }
 
-  queue.on('error', (error: Error) => {
+  sharedDeliveryQueue = new Bull<WebhookDeliveryJobPayload>(
+    WEBHOOK_DELIVERY_QUEUE,
+    process.env.REDIS_URL,
+    { settings: { retryProcessDelay: 5000 } }
+  );
+
+  sharedDeliveryQueue.on('error', (error: Error) => {
     console.error('Webhook delivery queue Redis error:', error);
   });
 
-  return queue;
+  return sharedDeliveryQueue;
+}
+
+export function closeDeliveryQueue(): Promise<void> {
+  if (!sharedDeliveryQueue) {
+    return Promise.resolve();
+  }
+  const queue = sharedDeliveryQueue;
+  sharedDeliveryQueue = null;
+  return queue.close();
 }
 
 export const WebhookService = {
@@ -127,6 +142,27 @@ export const WebhookService = {
     });
 
     return webhooks.map(mapConfigRecord);
+  },
+
+  async toggleWebhook(webhookId: string, userId: string): Promise<WebhookConfigResponse> {
+    const webhook = await prisma.webhookConfig.findUnique({
+      where: { id: webhookId },
+    });
+
+    if (!webhook) {
+      throw new Error('Webhook not found');
+    }
+
+    if (webhook.userId !== userId) {
+      throw new Error('Webhook not found');
+    }
+
+    const updated = await prisma.webhookConfig.update({
+      where: { id: webhookId },
+      data: { active: !webhook.active },
+    });
+
+    return mapConfigRecord(updated);
   },
 
   async deleteWebhook(webhookId: string, userId: string): Promise<void> {
@@ -199,7 +235,7 @@ export const WebhookService = {
     }
 
     try {
-      const queue = createDeliveryQueue();
+      const queue = getDeliveryQueue();
       if (!queue) {
         await processDeliveryInline(payload);
         return;
@@ -210,8 +246,6 @@ export const WebhookService = {
         removeOnComplete: 500,
         removeOnFail: 500,
       });
-
-      await queue.close();
     } catch (error) {
       console.error('Failed to enqueue webhook delivery, falling back to inline:', error);
       await processDeliveryInline(payload);
@@ -296,10 +330,10 @@ export const WebhookService = {
         await prisma.webhookDelivery.update({
           where: { id: delivery.id },
           data: {
-            status: 'delivered',
+            status: 'failed',
             statusCode: response.status,
             response: responseText.slice(0, 1000),
-            deliveredAt: new Date(),
+            error: `HTTP ${response.status}`,
           },
         });
         return;

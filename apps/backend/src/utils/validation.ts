@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { WEBHOOK_EVENTS } from '../types/webhook.types';
+
 /** Parse query-string booleans safely (`"false"` must not become `true`). */
 export const queryBooleanSchema = z
   .enum(['true', 'false'])
@@ -176,7 +178,9 @@ export const reportTemplateIdParamSchema = z.object({
 
 export const createWebhookSchema = z.object({
   url: z.string().url('Invalid webhook URL'),
-  events: z.array(z.string().min(1)).min(1, 'At least one event is required'),
+  events: z
+    .array(z.enum(WEBHOOK_EVENTS as [string, ...string[]]))
+    .min(1, 'At least one event is required'),
   headers: z.record(z.string()).optional(),
 });
 

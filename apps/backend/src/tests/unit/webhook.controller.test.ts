@@ -9,6 +9,7 @@ jest.mock('../../services/webhook.service', () => ({
   WebhookService: {
     createWebhook: jest.fn(),
     listWebhooks: jest.fn(),
+    toggleWebhook: jest.fn(),
     deleteWebhook: jest.fn(),
     testWebhook: jest.fn(),
     getDeliveries: jest.fn(),
@@ -17,6 +18,7 @@ jest.mock('../../services/webhook.service', () => ({
 
 const mockCreateWebhook = WebhookService.createWebhook as jest.Mock;
 const mockListWebhooks = WebhookService.listWebhooks as jest.Mock;
+const mockToggleWebhook = WebhookService.toggleWebhook as jest.Mock;
 const mockDeleteWebhook = WebhookService.deleteWebhook as jest.Mock;
 const mockTestWebhook = WebhookService.testWebhook as jest.Mock;
 const mockGetDeliveries = WebhookService.getDeliveries as jest.Mock;
@@ -132,6 +134,47 @@ describe('WebhookController', () => {
 
       expect(res.statusCode).toBe(200);
       expect(res.body).toEqual({ success: true, data: [] });
+    });
+  });
+
+  describe('toggleWebhook', () => {
+    it('should return 401 if not authenticated', async () => {
+      const req = createAuthRequest({ user: undefined, params: { id: 'wh-1' } });
+      const res = createMockResponse();
+
+      await WebhookController.toggleWebhook(req, res as unknown as Response);
+
+      expect(res.statusCode).toBe(401);
+    });
+
+    it('should toggle a webhook and return 200', async () => {
+      const req = createAuthRequest({ params: { id: 'wh-1' } });
+      const res = createMockResponse();
+
+      mockToggleWebhook.mockResolvedValue({
+        id: 'wh-1',
+        userId: 'user-1',
+        url: 'https://example.com/hook',
+        events: ['transaction.completed'],
+        active: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await WebhookController.toggleWebhook(req, res as unknown as Response);
+
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('should return 404 if webhook not found', async () => {
+      const req = createAuthRequest({ params: { id: 'wh-999' } });
+      const res = createMockResponse();
+
+      mockToggleWebhook.mockRejectedValue(new Error('Webhook not found'));
+
+      await WebhookController.toggleWebhook(req, res as unknown as Response);
+
+      expect(res.statusCode).toBe(404);
     });
   });
 
