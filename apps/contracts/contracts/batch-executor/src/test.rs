@@ -110,7 +110,7 @@ fn create_batch_stores_operations_and_initial_status() {
         "BatchCreated event expected"
     );
 
-    let stored = cl.get_batch_status(&id).unwrap();
+    let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Pending);
     assert_eq!(stored.id, id);
     assert_eq!(stored.operations.len(), 1);
@@ -167,7 +167,7 @@ fn execute_batch_all_operations_succeed() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 100)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id).unwrap();
+    cl.execute_batch(&id);
 
     // BatchExecuted event emitted
     assert_ne!(
@@ -176,7 +176,7 @@ fn execute_batch_all_operations_succeed() {
         "BatchExecuted event expected"
     );
 
-    let stored = cl.get_batch_status(&id).unwrap();
+    let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Completed);
     assert!(stored.executed_at.is_some());
     assert_eq!(callee_client.read(), 100);
@@ -211,7 +211,7 @@ fn execute_batch_failure_atomic_rollback() {
     );
 
     // Batch rolls back to its pre-execution state.
-    let stored = cl.get_batch_status(&id).unwrap();
+    let stored = cl.get_batch_status(&id);
     assert_eq!(
         stored.status,
         BatchStatus::Pending,
@@ -238,7 +238,7 @@ fn execute_batch_twice_rejected() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 50)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id).unwrap();
+    cl.execute_batch(&id);
 
     let result = cl.try_execute_batch(&id);
     assert!(
@@ -269,7 +269,7 @@ fn execute_batch_rejects_non_pending_state() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 10)]);
     let id = cl.create_batch(&ops);
 
-    cl.cancel_batch(&id).unwrap();
+    cl.cancel_batch(&id);
 
     let result = cl.try_execute_batch(&id);
     assert!(
@@ -303,7 +303,7 @@ fn execute_batch_reentrancy_guard() {
     assert!(result.is_err());
 
     // Soroban rollback restores batch to Pending.
-    let stored = cl.get_batch_status(&id).unwrap();
+    let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Pending);
 }
 
@@ -340,7 +340,7 @@ fn execute_batch_cross_contract_atomic_rollback() {
 
     // 2. Batch remains in Pending (Soroban rolled back all state).
     assert_eq!(
-        cl.get_batch_status(&id).unwrap().status,
+        cl.get_batch_status(&id).status,
         BatchStatus::Pending,
         "batch rolls back to Pending"
     );
@@ -395,7 +395,7 @@ fn get_batch_status_returns_full_batch() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 77)]);
     let id = cl.create_batch(&ops);
-    let stored = cl.get_batch_status(&id).unwrap();
+    let stored = cl.get_batch_status(&id);
 
     assert_eq!(stored.id, id);
     assert_eq!(stored.operations.len(), 1);
@@ -419,7 +419,7 @@ fn cancel_pending_batch_transitions_to_failed() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 10)]);
     let id = cl.create_batch(&ops);
 
-    cl.cancel_batch(&id).unwrap();
+    cl.cancel_batch(&id);
 
     // BatchCancelled event emitted
     assert_ne!(
@@ -428,7 +428,7 @@ fn cancel_pending_batch_transitions_to_failed() {
         "BatchCancelled event expected"
     );
 
-    let stored = cl.get_batch_status(&id).unwrap();
+    let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Failed);
 }
 
@@ -443,7 +443,7 @@ fn cancel_completed_batch_returns_error() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 10)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id).unwrap();
+    cl.execute_batch(&id);
 
     let result = cl.try_cancel_batch(&id);
     assert!(result.is_err(), "canceling executed batch should error");
@@ -480,7 +480,7 @@ fn rollback_completed_batch_returns_error() {
 
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 10)]);
     let id = cl.create_batch(&ops);
-    cl.execute_batch(&id).unwrap();
+    cl.execute_batch(&id);
 
     let result = cl.try_rollback_batch(&id);
     assert!(result.is_err(), "rollback on completed batch should error");
@@ -519,17 +519,11 @@ fn lifecycle_pending_to_completed() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 555)]);
     let id = cl.create_batch(&ops);
 
-    assert_eq!(
-        cl.get_batch_status(&id).unwrap().status,
-        BatchStatus::Pending
-    );
+    assert_eq!(cl.get_batch_status(&id).status, BatchStatus::Pending);
 
-    cl.execute_batch(&id).unwrap();
+    cl.execute_batch(&id);
 
-    assert_eq!(
-        cl.get_batch_status(&id).unwrap().status,
-        BatchStatus::Completed
-    );
+    assert_eq!(cl.get_batch_status(&id).status, BatchStatus::Completed);
     assert_eq!(callee_client.read(), 555);
 }
 
@@ -545,17 +539,11 @@ fn lifecycle_pending_to_failed() {
     let ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 555)]);
     let id = cl.create_batch(&ops);
 
-    assert_eq!(
-        cl.get_batch_status(&id).unwrap().status,
-        BatchStatus::Pending
-    );
+    assert_eq!(cl.get_batch_status(&id).status, BatchStatus::Pending);
 
-    cl.cancel_batch(&id).unwrap();
+    cl.cancel_batch(&id);
 
-    assert_eq!(
-        cl.get_batch_status(&id).unwrap().status,
-        BatchStatus::Failed
-    );
+    assert_eq!(cl.get_batch_status(&id).status, BatchStatus::Failed);
 }
 
 #[test]
@@ -576,16 +564,13 @@ fn lifecycle_failed_execute_rolls_back_to_pending() {
     );
     let id = cl.create_batch(&ops);
 
-    assert_eq!(
-        cl.get_batch_status(&id).unwrap().status,
-        BatchStatus::Pending
-    );
+    assert_eq!(cl.get_batch_status(&id).status, BatchStatus::Pending);
 
     // execute_batch fails atomically — batch stays Pending.
     let result = cl.try_execute_batch(&id);
     assert!(result.is_err());
 
-    let stored = cl.get_batch_status(&id).unwrap();
+    let stored = cl.get_batch_status(&id);
     assert_eq!(stored.status, BatchStatus::Pending);
 
     // A new execution attempt is still possible since batch is Pending.
@@ -593,9 +578,6 @@ fn lifecycle_failed_execute_rolls_back_to_pending() {
     // (This proves the rollback fully reset the state.)
     let success_ops = Vec::from_array(&env, [make_op(&env, &callee, "write", 200)]);
     let id2 = cl.create_batch(&success_ops);
-    cl.execute_batch(&id2).unwrap();
-    assert_eq!(
-        cl.get_batch_status(&id2).unwrap().status,
-        BatchStatus::Completed
-    );
+    cl.execute_batch(&id2);
+    assert_eq!(cl.get_batch_status(&id2).status, BatchStatus::Completed);
 }
