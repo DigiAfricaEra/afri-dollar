@@ -2,7 +2,11 @@ import { Router } from 'express';
 
 import { FXController } from '../controllers/fx.controller';
 import { adminMiddleware, authMiddleware } from '../middleware/auth.middleware';
-import { generalRateLimiter, sensitiveRateLimiter } from '../middleware/rate-limit.middleware';
+import {
+  generalRateLimiter,
+  ipPreAuthRateLimiter,
+  sensitiveRateLimiter,
+} from '../middleware/rate-limit.middleware';
 
 const fxRouter = Router();
 
@@ -14,18 +18,31 @@ fxRouter.post('/quote', generalRateLimiter, (req, res, next) => {
   FXController.createQuote(req, res).catch(next);
 });
 
-fxRouter.post('/convert', authMiddleware, sensitiveRateLimiter, (req, res, next) => {
-  FXController.convert(req, res).catch(next);
-});
+fxRouter.post(
+  '/convert',
+  ipPreAuthRateLimiter,
+  authMiddleware,
+  sensitiveRateLimiter,
+  (req, res, next) => {
+    FXController.convert(req, res).catch(next);
+  }
+);
 
-fxRouter.get('/history', authMiddleware, generalRateLimiter, (req, res, next) => {
-  FXController.history(req, res).catch(next);
-});
+fxRouter.get(
+  '/history',
+  ipPreAuthRateLimiter,
+  authMiddleware,
+  generalRateLimiter,
+  (req, res, next) => {
+    FXController.history(req, res).catch(next);
+  }
+);
 
 const adminFxRouter = Router();
 
 adminFxRouter.post(
   '/rates',
+  ipPreAuthRateLimiter,
   authMiddleware,
   adminMiddleware,
   sensitiveRateLimiter,
@@ -36,6 +53,7 @@ adminFxRouter.post(
 
 adminFxRouter.delete(
   '/rates/:id',
+  ipPreAuthRateLimiter,
   authMiddleware,
   adminMiddleware,
   sensitiveRateLimiter,

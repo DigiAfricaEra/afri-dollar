@@ -2,7 +2,11 @@ import { Router } from 'express';
 
 import { AuthController } from '../controllers/auth.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { authRateLimiter, generalRateLimiter } from '../middleware/rate-limit.middleware';
+import {
+  authRateLimiter,
+  generalRateLimiter,
+  ipPreAuthRateLimiter,
+} from '../middleware/rate-limit.middleware';
 import { authSecurityMiddleware } from '../middleware/security.middleware';
 import { validate } from '../middleware/validation.middleware';
 import { loginSchema, registerSchema, refreshTokenSchema } from '../utils/validation';
@@ -52,6 +56,7 @@ authRouter.post(
  */
 authRouter.post(
   '/logout',
+  ipPreAuthRateLimiter,
   authSecurityMiddleware('logout'),
   authMiddleware,
   authRateLimiter,
@@ -81,8 +86,14 @@ authRouter.post(
  * GET /api/v1/auth/me
  * Get current user information (requires valid JWT)
  */
-authRouter.get('/me', authMiddleware, generalRateLimiter, (req, res, next) => {
-  AuthController.me(req, res).catch(next);
-});
+authRouter.get(
+  '/me',
+  ipPreAuthRateLimiter,
+  authMiddleware,
+  generalRateLimiter,
+  (req, res, next) => {
+    AuthController.me(req, res).catch(next);
+  }
+);
 
 export default authRouter;

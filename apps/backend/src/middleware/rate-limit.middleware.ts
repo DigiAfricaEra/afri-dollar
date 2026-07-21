@@ -14,6 +14,7 @@ export const rateLimits = {
   auth: { windowMs: 15 * 60 * 1000, maxRequests: 5 },
   general: { windowMs: 15 * 60 * 1000, maxRequests: 100 },
   sensitive: { windowMs: 60 * 60 * 1000, maxRequests: 10 },
+  ipPreAuth: { windowMs: 15 * 60 * 1000, maxRequests: 50 },
 } satisfies Record<string, RateLimitConfig>;
 
 type RedisClient = ReturnType<typeof createClient>;
@@ -30,10 +31,11 @@ type RateLimitDecision = {
 const memoryStore = new Map<string, number[]>();
 let redisClient: RedisClient | null = null;
 let redisConnectPromise: Promise<RedisClient | null> | null = null;
-let redisDisabled = false;
+let redisDisabledUntil = 0;
+const REDIS_COOLDOWN_MS = 30_000;
 
 function getRequestIp(req: AuthRequest): string {
-  return req.ip || req.socket.remoteAddress || 'unknown';
+  return req.ip ?? req.socket.remoteAddress ?? 'unknown';
 }
 
 function getRequestIdentity(req: AuthRequest): string {
@@ -49,6 +51,11 @@ function getRateLimitKey(req: AuthRequest, config: RateLimitConfig): string {
   return `rate_limit:${config.windowMs}:${config.maxRequests}:${identity}`;
 }
 
+function getIpKey(req: AuthRequest, config: RateLimitConfig): string {
+  const ip = getRequestIp(req);
+  return `rate_limit:${config.windowMs}:${config.maxRequests}:ip:${encodeURIComponent(ip)}`;
+}
+
 function getUnixResetTimestamp(resetAtMs: number): number {
   return Math.ceil(resetAtMs / 1000);
 }
@@ -59,8 +66,8 @@ function setRateLimitHeaders(res: Response, decision: RateLimitDecision): void {
   res.setHeader('X-RateLimit-Reset', String(getUnixResetTimestamp(decision.resetAt)));
 }
 
-async function getRedisClient(): Promise<RedisClient | null> {
-  if (redisDisabled || !process.env.REDIS_URL) {
+function getRedisClientSync(): RedisClient | null {
+  if (!process.env.REDIS_URL) {
     return null;
   }
 
@@ -68,27 +75,51 @@ async function getRedisClient(): Promise<RedisClient | null> {
     return redisClient;
   }
 
-  if (!redisConnectPromise) {
-    redisConnectPromise = (async (): Promise<RedisClient | null> => {
-      try {
-        const client = createClient({ url: process.env.REDIS_URL });
-
-        client.on('error', (error: unknown) => {
-          console.error('Redis rate limit store error:', error);
-        });
-
-        await client.connect();
-        redisClient = client;
-        return client;
-      } catch (error) {
-        console.error('Redis rate limit store unavailable, using in-memory fallback:', error);
-        redisDisabled = true;
-        return null;
-      }
-    })();
+  if (redisDisabledUntil && Date.now() < redisDisabledUntil) {
+    return null;
   }
 
-  return redisConnectPromise;
+  if (redisConnectPromise) {
+    return null;
+  }
+
+  redisConnectPromise = (async (): Promise<RedisClient | null> => {
+    try {
+      const client = createClient({ url: process.env.REDIS_URL });
+
+      client.on('error', (error: unknown) => {
+        console.error('Redis rate limit store error:', error);
+        redisClient = null;
+        redisConnectPromise = null;
+        redisDisabledUntil = Date.now() + REDIS_COOLDOWN_MS;
+      });
+
+      await client.connect();
+      redisClient = client;
+      redisConnectPromise = null;
+      return client;
+    } catch (error) {
+      console.error('Redis rate limit store unavailable, using in-memory fallback:', error);
+      redisDisabledUntil = Date.now() + REDIS_COOLDOWN_MS;
+      redisConnectPromise = null;
+      return null;
+    }
+  })();
+
+  return null;
+}
+
+async function getRedisClient(): Promise<RedisClient | null> {
+  const sync = getRedisClientSync();
+  if (sync) {
+    return sync;
+  }
+
+  if (redisConnectPromise) {
+    return redisConnectPromise;
+  }
+
+  return null;
 }
 
 async function consumeRedisLimit(
@@ -102,27 +133,35 @@ async function consumeRedisLimit(
     return null;
   }
 
-  const windowStart = now - config.windowMs;
-  const member = `${now}:${process.hrtime.bigint().toString()}:${Math.random()}`;
+  try {
+    const windowStart = now - config.windowMs;
+    const member = `${now}:${process.hrtime.bigint().toString()}:${Math.random()}`;
 
-  await redis.zRemRangeByScore(key, 0, windowStart);
-  await redis.zAdd(key, { score: now, value: member });
-  await redis.pExpire(key, config.windowMs);
+    await redis.zRemRangeByScore(key, 0, windowStart);
+    await redis.zAdd(key, { score: now, value: member });
+    await redis.pExpire(key, config.windowMs);
 
-  const count = await redis.zCard(key);
-  const oldest = await redis.zRangeWithScores(key, 0, 0);
-  const oldestScore = oldest[0]?.score ?? now;
-  const resetAt = oldestScore + config.windowMs;
-  const remaining = Math.max(config.maxRequests - count, 0);
+    const count = await redis.zCard(key);
+    const oldest = await redis.zRangeWithScores(key, 0, 0);
+    const oldestScore = oldest[0]?.score ?? now;
+    const resetAt = oldestScore + config.windowMs;
+    const remaining = Math.max(config.maxRequests - count, 0);
 
-  return {
-    allowed: count <= config.maxRequests,
-    limit: config.maxRequests,
-    remaining,
-    resetAt,
-    key,
-    member,
-  };
+    return {
+      allowed: count <= config.maxRequests,
+      limit: config.maxRequests,
+      remaining,
+      resetAt,
+      key,
+      member,
+    };
+  } catch (error) {
+    console.error('Redis rate limit command failed, falling back to memory:', error);
+    redisClient = null;
+    redisConnectPromise = null;
+    redisDisabledUntil = Date.now() + REDIS_COOLDOWN_MS;
+    return null;
+  }
 }
 
 function consumeMemoryLimit(key: string, config: RateLimitConfig, now: number): RateLimitDecision {
@@ -130,14 +169,17 @@ function consumeMemoryLimit(key: string, config: RateLimitConfig, now: number): 
   const existing = memoryStore.get(key) ?? [];
   const requests = existing.filter((timestamp) => timestamp > windowStart);
 
-  requests.push(now);
+  const allowed = requests.length < config.maxRequests;
+  if (allowed) {
+    requests.push(now);
+  }
   memoryStore.set(key, requests);
 
   const oldest = requests[0] ?? now;
   const count = requests.length;
 
   return {
-    allowed: count <= config.maxRequests,
+    allowed,
     limit: config.maxRequests,
     remaining: Math.max(config.maxRequests - count, 0),
     resetAt: oldest + config.windowMs,
@@ -153,8 +195,12 @@ async function decrementRedisLimit(decision: RateLimitDecision): Promise<boolean
     return false;
   }
 
-  await redis.zRem(decision.key, decision.member);
-  return true;
+  try {
+    await redis.zRem(decision.key, decision.member);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function decrementMemoryLimit(decision: RateLimitDecision): void {
@@ -186,10 +232,11 @@ async function applyRateLimit(
   req: AuthRequest,
   res: Response,
   next: NextFunction,
-  config: RateLimitConfig
+  config: RateLimitConfig,
+  keyFn: (req: AuthRequest, config: RateLimitConfig) => string
 ): Promise<void> {
   const now = Date.now();
-  const key = getRateLimitKey(req, config);
+  const key = keyFn(req, config);
   const decision =
     (await consumeRedisLimit(key, config, now)) ?? consumeMemoryLimit(key, config, now);
 
@@ -208,10 +255,12 @@ async function applyRateLimit(
   });
 
   if (!decision.allowed) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((decision.resetAt - now) / 1000));
+    res.setHeader('Retry-After', String(retryAfterSeconds));
     res.status(429).json({
       success: false,
       error: 'Too many requests',
-      retryAfterSeconds: Math.max(1, Math.ceil((decision.resetAt - now) / 1000)),
+      retryAfterSeconds,
     });
     return;
   }
@@ -221,10 +270,17 @@ async function applyRateLimit(
 
 export const rateLimiter = (config: RateLimitConfig): RequestHandler => {
   return (req, res, next): void => {
-    void applyRateLimit(req as AuthRequest, res, next, config).catch(next);
+    void applyRateLimit(req as AuthRequest, res, next, config, getRateLimitKey).catch(next);
+  };
+};
+
+export const ipRateLimiter = (config: RateLimitConfig): RequestHandler => {
+  return (req, res, next): void => {
+    void applyRateLimit(req as AuthRequest, res, next, config, getIpKey).catch(next);
   };
 };
 
 export const authRateLimiter: RequestHandler = rateLimiter(rateLimits.auth);
 export const sensitiveRateLimiter: RequestHandler = rateLimiter(rateLimits.sensitive);
 export const generalRateLimiter: RequestHandler = rateLimiter(rateLimits.general);
+export const ipPreAuthRateLimiter: RequestHandler = ipRateLimiter(rateLimits.ipPreAuth);

@@ -2,21 +2,38 @@ import { Router } from 'express';
 
 import { ReportController } from '../controllers/report.controller';
 import { adminMiddleware, authMiddleware } from '../middleware/auth.middleware';
-import { generalRateLimiter, sensitiveRateLimiter } from '../middleware/rate-limit.middleware';
+import {
+  generalRateLimiter,
+  ipPreAuthRateLimiter,
+  sensitiveRateLimiter,
+} from '../middleware/rate-limit.middleware';
 
 const reportRouter = Router();
 
-reportRouter.post('/', authMiddleware, sensitiveRateLimiter, (req, res, next) => {
-  ReportController.generate(req, res).catch(next);
-});
+reportRouter.post(
+  '/',
+  ipPreAuthRateLimiter,
+  authMiddleware,
+  sensitiveRateLimiter,
+  (req, res, next) => {
+    ReportController.generate(req, res).catch(next);
+  }
+);
 
-reportRouter.get('/', authMiddleware, generalRateLimiter, (req, res, next) => {
-  ReportController.listReports(req, res).catch(next);
-});
+reportRouter.get(
+  '/',
+  ipPreAuthRateLimiter,
+  authMiddleware,
+  generalRateLimiter,
+  (req, res, next) => {
+    ReportController.listReports(req, res).catch(next);
+  }
+);
 
 // Admin template routes (before /:id to avoid param collision)
 reportRouter.get(
   '/templates',
+  ipPreAuthRateLimiter,
   authMiddleware,
   adminMiddleware,
   generalRateLimiter,
@@ -27,6 +44,7 @@ reportRouter.get(
 
 reportRouter.post(
   '/templates',
+  ipPreAuthRateLimiter,
   authMiddleware,
   adminMiddleware,
   sensitiveRateLimiter,
@@ -37,6 +55,7 @@ reportRouter.post(
 
 reportRouter.get(
   '/templates/:templateId',
+  ipPreAuthRateLimiter,
   authMiddleware,
   adminMiddleware,
   generalRateLimiter,
@@ -47,6 +66,7 @@ reportRouter.get(
 
 reportRouter.put(
   '/templates/:templateId',
+  ipPreAuthRateLimiter,
   authMiddleware,
   adminMiddleware,
   sensitiveRateLimiter,
@@ -57,6 +77,7 @@ reportRouter.put(
 
 reportRouter.delete(
   '/templates/:templateId',
+  ipPreAuthRateLimiter,
   authMiddleware,
   adminMiddleware,
   sensitiveRateLimiter,
@@ -65,12 +86,24 @@ reportRouter.delete(
   }
 );
 
-reportRouter.get('/:id', authMiddleware, generalRateLimiter, (req, res, next) => {
-  ReportController.getReport(req, res).catch(next);
-});
+reportRouter.get(
+  '/:id',
+  ipPreAuthRateLimiter,
+  authMiddleware,
+  generalRateLimiter,
+  (req, res, next) => {
+    ReportController.getReport(req, res).catch(next);
+  }
+);
 
-reportRouter.get('/:id/download', authMiddleware, generalRateLimiter, (req, res, next) => {
-  ReportController.download(req, res).catch(next);
-});
+reportRouter.get(
+  '/:id/download',
+  ipPreAuthRateLimiter,
+  authMiddleware,
+  generalRateLimiter,
+  (req, res, next) => {
+    ReportController.download(req, res).catch(next);
+  }
+);
 
 export default reportRouter;

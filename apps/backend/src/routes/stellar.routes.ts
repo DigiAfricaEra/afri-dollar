@@ -2,7 +2,7 @@ import { Router } from 'express';
 
 import { StellarController } from '../controllers/stellar.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { generalRateLimiter } from '../middleware/rate-limit.middleware';
+import { generalRateLimiter, ipPreAuthRateLimiter } from '../middleware/rate-limit.middleware';
 
 /**
  * Router for Stellar-related endpoints.
@@ -15,7 +15,7 @@ import { generalRateLimiter } from '../middleware/rate-limit.middleware';
  */
 const stellarRouter = Router();
 
-stellarRouter.use(authMiddleware, generalRateLimiter);
+stellarRouter.use(ipPreAuthRateLimiter, authMiddleware, generalRateLimiter);
 
 /**
  * GET /balances/:publicKey

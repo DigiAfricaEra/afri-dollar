@@ -2,11 +2,11 @@ import { Router } from 'express';
 
 import { WebhookController } from '../controllers/webhook.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { sensitiveRateLimiter } from '../middleware/rate-limit.middleware';
+import { ipPreAuthRateLimiter, sensitiveRateLimiter } from '../middleware/rate-limit.middleware';
 
 const webhookRouter = Router();
 
-webhookRouter.use(authMiddleware, sensitiveRateLimiter);
+webhookRouter.use(ipPreAuthRateLimiter, authMiddleware, sensitiveRateLimiter);
 
 webhookRouter.post('/', (req, res, next) => {
   WebhookController.createWebhook(req, res).catch(next);
