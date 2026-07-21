@@ -101,7 +101,7 @@ describe('NotificationService', () => {
       delete process.env.SENDGRID_API_KEY;
     });
 
-    it('should HTML escape variable values inserted into templates', async () => {
+    it('should HTML escape variable values in HTML email body while preserving raw text in text body', async () => {
       process.env.SENDGRID_API_KEY = 'SG.test-key';
       const sgMail = require('@sendgrid/mail');
 
@@ -111,7 +111,8 @@ describe('NotificationService', () => {
 
       expect(sgMail.send).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: expect.stringContaining('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'),
+          text: expect.stringContaining('<script>alert("xss")</script>'),
+          html: expect.stringContaining('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'),
         })
       );
 

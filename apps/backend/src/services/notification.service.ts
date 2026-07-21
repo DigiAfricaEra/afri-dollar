@@ -98,7 +98,7 @@ function escapeHtml(str: string): string {
 
 function renderTemplate(template: string, data: Record<string, unknown>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) =>
-    key in data ? escapeHtml(String(data[key])) : `{{${key}}}`
+    key in data ? String(data[key]) : `{{${key}}}`
   );
 }
 
@@ -136,7 +136,7 @@ async function deliverEmail(to: string, subject: string, body: string): Promise<
       from: process.env.SENDGRID_FROM_EMAIL ?? 'noreply@afridollar.com',
       subject,
       text: body,
-      html: `<p>${body.replace(/\n/g, '<br/>')}</p>`,
+      html: `<p>${escapeHtml(body).replace(/\n/g, '<br/>')}</p>`,
     })
   );
 }
