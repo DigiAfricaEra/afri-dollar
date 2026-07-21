@@ -34,6 +34,12 @@ let redisConnectPromise: Promise<RedisClient | null> | null = null;
 let redisDisabledUntil = 0;
 const REDIS_COOLDOWN_MS = 30_000;
 
+function disableRedis(): void {
+  redisClient = null;
+  redisConnectPromise = null;
+  redisDisabledUntil = Date.now() + REDIS_COOLDOWN_MS;
+}
+
 function getRequestIp(req: AuthRequest): string {
   return req.ip ?? req.socket.remoteAddress ?? 'unknown';
 }
@@ -89,9 +95,7 @@ function getRedisClientSync(): RedisClient | null {
 
       client.on('error', (error: unknown) => {
         console.error('Redis rate limit store error:', error);
-        redisClient = null;
-        redisConnectPromise = null;
-        redisDisabledUntil = Date.now() + REDIS_COOLDOWN_MS;
+        disableRedis();
       });
 
       await client.connect();
@@ -100,8 +104,7 @@ function getRedisClientSync(): RedisClient | null {
       return client;
     } catch (error) {
       console.error('Redis rate limit store unavailable, using in-memory fallback:', error);
-      redisDisabledUntil = Date.now() + REDIS_COOLDOWN_MS;
-      redisConnectPromise = null;
+      disableRedis();
       return null;
     }
   })();
@@ -157,9 +160,7 @@ async function consumeRedisLimit(
     };
   } catch (error) {
     console.error('Redis rate limit command failed, falling back to memory:', error);
-    redisClient = null;
-    redisConnectPromise = null;
-    redisDisabledUntil = Date.now() + REDIS_COOLDOWN_MS;
+    disableRedis();
     return null;
   }
 }
