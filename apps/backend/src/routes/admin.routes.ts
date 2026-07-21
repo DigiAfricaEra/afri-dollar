@@ -2,6 +2,7 @@ import { Router } from 'express';
 
 import { AdminController } from '../controllers/admin.controller';
 import { adminMiddleware, authMiddleware } from '../middleware/auth.middleware';
+import { sensitiveRateLimiter } from '../middleware/rate-limit.middleware';
 
 /**
  * Admin Dashboard Routes
@@ -9,7 +10,7 @@ import { adminMiddleware, authMiddleware } from '../middleware/auth.middleware';
  */
 const adminRouter = Router();
 
-adminRouter.use(authMiddleware, adminMiddleware);
+adminRouter.use(authMiddleware, adminMiddleware, sensitiveRateLimiter);
 
 // User management
 adminRouter.get('/users', (req, res, next) => {

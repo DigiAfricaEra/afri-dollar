@@ -2,6 +2,7 @@ import { Router } from 'express';
 
 import { AuthController } from '../controllers/auth.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+import { authRateLimiter, generalRateLimiter } from '../middleware/rate-limit.middleware';
 import { authSecurityMiddleware } from '../middleware/security.middleware';
 import { validate } from '../middleware/validation.middleware';
 import { loginSchema, registerSchema, refreshTokenSchema } from '../utils/validation';
@@ -20,6 +21,7 @@ const authRouter = Router();
  */
 authRouter.post(
   '/register',
+  authRateLimiter,
   authSecurityMiddleware('register'),
   validate(registerSchema),
   (req, res, next) => {
@@ -35,6 +37,7 @@ authRouter.post(
  */
 authRouter.post(
   '/login',
+  authRateLimiter,
   authSecurityMiddleware('login'),
   validate(loginSchema),
   (req, res, next) => {
@@ -51,6 +54,7 @@ authRouter.post(
   '/logout',
   authSecurityMiddleware('logout'),
   authMiddleware,
+  authRateLimiter,
   validate(refreshTokenSchema),
   (req, res, next) => {
     AuthController.logout(req, res).catch(next);
@@ -65,6 +69,7 @@ authRouter.post(
  */
 authRouter.post(
   '/refresh',
+  authRateLimiter,
   authSecurityMiddleware('refresh'),
   validate(refreshTokenSchema),
   (req, res, next) => {
@@ -76,7 +81,7 @@ authRouter.post(
  * GET /api/v1/auth/me
  * Get current user information (requires valid JWT)
  */
-authRouter.get('/me', authMiddleware, (req, res, next) => {
+authRouter.get('/me', authMiddleware, generalRateLimiter, (req, res, next) => {
   AuthController.me(req, res).catch(next);
 });
 
