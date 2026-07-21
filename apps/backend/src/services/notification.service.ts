@@ -63,13 +63,42 @@ const TEMPLATES: Record<string, NotificationTemplate> = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+const PROVIDER_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = PROVIDER_TIMEOUT_MS): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Provider request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 function generateId(): string {
   return `notif_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
 }
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function renderTemplate(template: string, data: Record<string, unknown>): string {
   return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) =>
-    key in data ? String(data[key]) : `{{${key}}}`
+    key in data ? escapeHtml(String(data[key])) : `{{${key}}}`
   );
 }
 
@@ -81,6 +110,7 @@ function getDefaultPreferences(userId: string): NotificationPreferences {
     push: true,
     transactionAlerts: true,
     securityAlerts: true,
+    payrollAlerts: true,
     marketing: false,
   };
 }
@@ -100,31 +130,35 @@ async function deliverEmail(
 ): Promise<void> {
   const sgMail = await getEmailClient();
   if (!sgMail) {
-    console.warn('[NotificationService] SendGrid not configured – skipping email to', to);
+    console.warn('[NotificationService] SendGrid not configured – skipping email delivery');
     return;
   }
 
-  await sgMail.send({
-    to,
-    from: process.env.SENDGRID_FROM_EMAIL ?? 'noreply@afridollar.com',
-    subject,
-    text: body,
-    html: `<p>${body.replace(/\n/g, '<br/>')}</p>`,
-  });
+  await withTimeout(
+    sgMail.send({
+      to,
+      from: process.env.SENDGRID_FROM_EMAIL ?? 'noreply@afridollar.com',
+      subject,
+      text: body,
+      html: `<p>${body.replace(/\n/g, '<br/>')}</p>`,
+    })
+  );
 }
 
 async function deliverSMS(to: string, message: string): Promise<void> {
   const twilioClient = await getTwilioClient();
   if (!twilioClient) {
-    console.warn('[NotificationService] Twilio not configured – skipping SMS to', to);
+    console.warn('[NotificationService] Twilio not configured – skipping SMS delivery');
     return;
   }
 
-  await twilioClient.messages.create({
-    body: message,
-    from: process.env.TWILIO_PHONE_NUMBER ?? '',
-    to,
-  });
+  await withTimeout(
+    twilioClient.messages.create({
+      body: message,
+      from: process.env.TWILIO_PHONE_NUMBER ?? '',
+      to,
+    })
+  );
 }
 
 async function deliverPush(
@@ -137,7 +171,7 @@ async function deliverPush(
     return;
   }
 
-  await webpush.sendNotification(subscription, JSON.stringify(payload));
+  await withTimeout(webpush.sendNotification(subscription, JSON.stringify(payload)));
 }
 
 // ---------------------------------------------------------------------------
@@ -158,11 +192,12 @@ async function getEmailClient(): Promise<{ send: Function } | null> {
 
 async function getTwilioClient(): Promise<{ messages: { create: Function } } | null> {
   try {
-    const { accountSid, authToken } = {
+    const { accountSid, authToken, phoneNumber } = {
       accountSid: process.env.TWILIO_ACCOUNT_SID,
       authToken: process.env.TWILIO_AUTH_TOKEN,
+      phoneNumber: process.env.TWILIO_PHONE_NUMBER,
     };
-    if (!accountSid || !authToken) return null;
+    if (!accountSid || !authToken || !phoneNumber) return null;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const twilio = require('twilio');
     return twilio(accountSid, authToken);
@@ -231,7 +266,7 @@ export const NotificationService = {
 
   /**
    * High-level notify: checks user preferences and dispatches across all
-   * enabled channels.
+   * enabled channels concurrently.
    */
   async notify(
     userId: string,
@@ -243,9 +278,11 @@ export const NotificationService = {
     // Determine whether to send based on notification category
     const isTransactionEvent = type === 'transaction-completed' || type === 'transaction-failed';
     const isSecurityEvent = type === 'security-alert' || type === 'kyc-approved' || type === 'kyc-rejected';
+    const isPayrollEvent = type === 'payroll-processed';
 
     if (isTransactionEvent && !prefs.transactionAlerts) return;
     if (isSecurityEvent && !prefs.securityAlerts) return;
+    if (isPayrollEvent && !prefs.payrollAlerts) return;
 
     const tmpl = TEMPLATES[type];
     if (!tmpl) {
@@ -261,7 +298,7 @@ export const NotificationService = {
     if (prefs.sms) channels.push('sms');
     if (prefs.push) channels.push('push');
 
-    for (const channel of channels) {
+    const channelTasks = channels.map(async (channel) => {
       const notif: Notification = {
         id: generateId(),
         userId,
@@ -297,7 +334,9 @@ export const NotificationService = {
         console.error(`[NotificationService] Failed to send ${channel} notification:`, err);
         notif.status = 'failed';
       }
-    }
+    });
+
+    await Promise.all(channelTasks);
   },
 
   /**

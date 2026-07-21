@@ -2,7 +2,7 @@ export interface Notification {
   id: string;
   userId: string;
   type: 'email' | 'sms' | 'push';
-  channel: string;
+  channel: 'email' | 'sms' | 'push';
   template: string;
   data: Record<string, unknown>;
   status: 'pending' | 'sent' | 'delivered' | 'failed';
@@ -17,6 +17,7 @@ export interface NotificationPreferences {
   push: boolean;
   transactionAlerts: boolean;
   securityAlerts: boolean;
+  payrollAlerts: boolean;
   marketing: boolean;
 }
 

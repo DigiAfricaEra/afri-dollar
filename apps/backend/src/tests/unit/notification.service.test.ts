@@ -100,6 +100,23 @@ describe('NotificationService', () => {
 
       delete process.env.SENDGRID_API_KEY;
     });
+
+    it('should HTML escape variable values inserted into templates', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test-key';
+      const sgMail = require('@sendgrid/mail');
+
+      await NotificationService.sendEmail('user@test.com', 'kyc-approved', {
+        firstName: '<script>alert("xss")</script>',
+      });
+
+      expect(sgMail.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;'),
+        })
+      );
+
+      delete process.env.SENDGRID_API_KEY;
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -109,6 +126,7 @@ describe('NotificationService', () => {
     it('should gracefully skip when Twilio env vars are absent', async () => {
       delete process.env.TWILIO_ACCOUNT_SID;
       delete process.env.TWILIO_AUTH_TOKEN;
+      delete process.env.TWILIO_PHONE_NUMBER;
       await expect(
         NotificationService.sendSMS('+1234567890', 'Hello World')
       ).resolves.toBeUndefined();
@@ -119,7 +137,6 @@ describe('NotificationService', () => {
       process.env.TWILIO_AUTH_TOKEN = 'AUTH_TEST';
       process.env.TWILIO_PHONE_NUMBER = '+15550000000';
 
-      // The mock factory returns the same mock instance every time it's called
       const twilio = require('twilio');
       const mockClientInstance = { messages: { create: jest.fn().mockResolvedValue({ sid: 'SM_TEST' }) } };
       twilio.mockReturnValue(mockClientInstance);
@@ -135,6 +152,7 @@ describe('NotificationService', () => {
 
       delete process.env.TWILIO_ACCOUNT_SID;
       delete process.env.TWILIO_AUTH_TOKEN;
+      delete process.env.TWILIO_PHONE_NUMBER;
     });
   });
 
@@ -193,6 +211,7 @@ describe('NotificationService', () => {
       expect(prefs.push).toBe(true);
       expect(prefs.transactionAlerts).toBe(true);
       expect(prefs.securityAlerts).toBe(true);
+      expect(prefs.payrollAlerts).toBe(true);
       expect(prefs.marketing).toBe(false);
     });
   });
@@ -201,9 +220,11 @@ describe('NotificationService', () => {
     it('should update notification preferences', async () => {
       const updated = await NotificationService.updatePreferences('user-1', {
         email: false,
+        payrollAlerts: false,
         marketing: true,
       });
       expect(updated.email).toBe(false);
+      expect(updated.payrollAlerts).toBe(false);
       expect(updated.marketing).toBe(true);
       expect(updated.sms).toBe(true); // unchanged default
     });
@@ -254,6 +275,19 @@ describe('NotificationService', () => {
         email: 'carol@test.com',
       });
       const notifs = await NotificationService.getNotifications('user-300');
+      expect(notifs).toHaveLength(0);
+    });
+
+    it('should not send payroll alerts when disabled in preferences', async () => {
+      await NotificationService.updatePreferences('user-350', { payrollAlerts: false });
+      await NotificationService.notify('user-350', 'payroll-processed', {
+        batchName: 'July Salary',
+        count: '10',
+        total: '5000',
+        currency: 'USD',
+        email: 'payroll@test.com',
+      });
+      const notifs = await NotificationService.getNotifications('user-350');
       expect(notifs).toHaveLength(0);
     });
 
