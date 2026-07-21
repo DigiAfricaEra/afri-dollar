@@ -138,7 +138,9 @@ describe('NotificationService', () => {
       process.env.TWILIO_PHONE_NUMBER = '+15550000000';
 
       const twilio = require('twilio');
-      const mockClientInstance = { messages: { create: jest.fn().mockResolvedValue({ sid: 'SM_TEST' }) } };
+      const mockClientInstance = {
+        messages: { create: jest.fn().mockResolvedValue({ sid: 'SM_TEST' }) },
+      };
       twilio.mockReturnValue(mockClientInstance);
 
       await NotificationService.sendSMS('+19998887777', 'Test message');
@@ -188,10 +190,7 @@ describe('NotificationService', () => {
         'public-key',
         'private-key'
       );
-      expect(webpush.sendNotification).toHaveBeenCalledWith(
-        mockSubscription,
-        expect.any(String)
-      );
+      expect(webpush.sendNotification).toHaveBeenCalledWith(mockSubscription, expect.any(String));
 
       delete process.env.VAPID_SUBJECT;
       delete process.env.VAPID_PUBLIC_KEY;
@@ -293,7 +292,11 @@ describe('NotificationService', () => {
 
     it('should not send email notifications when email is disabled', async () => {
       process.env.SENDGRID_API_KEY = 'SG.test-key';
-      await NotificationService.updatePreferences('user-400', { email: false, sms: false, push: false });
+      await NotificationService.updatePreferences('user-400', {
+        email: false,
+        sms: false,
+        push: false,
+      });
       await NotificationService.notify('user-400', 'transaction-completed', {
         amount: '20',
         currency: 'USD',

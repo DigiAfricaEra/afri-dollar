@@ -76,9 +76,9 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number = PROVIDER_TIMEOU
         clearTimeout(timer);
         resolve(res);
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         clearTimeout(timer);
-        reject(err);
+        reject(err instanceof Error ? err : new Error(String(err)));
       });
   });
 }
@@ -123,11 +123,7 @@ function getUserPreferences(userId: string): NotificationPreferences {
 // Channel-level senders (thin wrappers — real integration injected via env)
 // ---------------------------------------------------------------------------
 
-async function deliverEmail(
-  to: string,
-  subject: string,
-  body: string
-): Promise<void> {
+async function deliverEmail(to: string, subject: string, body: string): Promise<void> {
   const sgMail = await getEmailClient();
   if (!sgMail) {
     console.warn('[NotificationService] SendGrid not configured – skipping email delivery');
@@ -178,10 +174,12 @@ async function deliverPush(
 // Lazy client factories (gracefully degrade if packages are absent / not configured)
 // ---------------------------------------------------------------------------
 
-async function getEmailClient(): Promise<{ send: Function } | null> {
+async function getEmailClient(): Promise<{
+  send: (data: unknown) => Promise<unknown>;
+} | null> {
   try {
     if (!process.env.SENDGRID_API_KEY) return null;
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const sgMail = require('@sendgrid/mail');
     sgMail.setApiKey(process.env.SENDGRID_API_KEY);
     return sgMail;
@@ -190,7 +188,9 @@ async function getEmailClient(): Promise<{ send: Function } | null> {
   }
 }
 
-async function getTwilioClient(): Promise<{ messages: { create: Function } } | null> {
+async function getTwilioClient(): Promise<{
+  messages: { create: (data: unknown) => Promise<unknown> };
+} | null> {
   try {
     const { accountSid, authToken, phoneNumber } = {
       accountSid: process.env.TWILIO_ACCOUNT_SID,
@@ -198,7 +198,7 @@ async function getTwilioClient(): Promise<{ messages: { create: Function } } | n
       phoneNumber: process.env.TWILIO_PHONE_NUMBER,
     };
     if (!accountSid || !authToken || !phoneNumber) return null;
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const twilio = require('twilio');
     return twilio(accountSid, authToken);
   } catch {
@@ -207,8 +207,8 @@ async function getTwilioClient(): Promise<{ messages: { create: Function } } | n
 }
 
 async function getWebPushClient(): Promise<{
-  sendNotification: Function;
-  setVapidDetails: Function;
+  sendNotification: (sub: unknown, payload: string) => Promise<unknown>;
+  setVapidDetails: (s: string, pub: string, priv: string) => void;
 } | null> {
   try {
     const { subject, publicKey, privateKey } = {
@@ -217,7 +217,7 @@ async function getWebPushClient(): Promise<{
       privateKey: process.env.VAPID_PRIVATE_KEY,
     };
     if (!subject || !publicKey || !privateKey) return null;
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const webpush = require('web-push');
     webpush.setVapidDetails(subject, publicKey, privateKey);
     return webpush;
@@ -233,11 +233,7 @@ export const NotificationService = {
   /**
    * Send an email using a template.
    */
-  async sendEmail(
-    to: string,
-    template: string,
-    data: Record<string, unknown>
-  ): Promise<void> {
+  async sendEmail(to: string, template: string, data: Record<string, unknown>): Promise<void> {
     const tmpl = TEMPLATES[template];
     if (!tmpl) throw new Error(`Unknown template: ${template}`);
 
@@ -257,10 +253,7 @@ export const NotificationService = {
   /**
    * Send a web push notification.
    */
-  async sendPush(
-    subscription: PushSubscription,
-    data: Record<string, unknown>
-  ): Promise<void> {
+  async sendPush(subscription: PushSubscription, data: Record<string, unknown>): Promise<void> {
     await deliverPush(subscription, data);
   },
 
@@ -277,7 +270,8 @@ export const NotificationService = {
 
     // Determine whether to send based on notification category
     const isTransactionEvent = type === 'transaction-completed' || type === 'transaction-failed';
-    const isSecurityEvent = type === 'security-alert' || type === 'kyc-approved' || type === 'kyc-rejected';
+    const isSecurityEvent =
+      type === 'security-alert' || type === 'kyc-approved' || type === 'kyc-rejected';
     const isPayrollEvent = type === 'payroll-processed';
 
     if (isTransactionEvent && !prefs.transactionAlerts) return;
@@ -311,19 +305,20 @@ export const NotificationService = {
       notificationStore.push(notif);
 
       try {
-        if (channel === 'email' && data.email) {
-          await deliverEmail(String(data.email), subject, body);
+        if (channel === 'email' && typeof data.email === 'string') {
+          await deliverEmail(data.email, subject, body);
           notif.status = 'sent';
           notif.sentAt = new Date();
-        } else if (channel === 'sms' && data.phone) {
-          await deliverSMS(String(data.phone), body);
+        } else if (channel === 'sms' && typeof data.phone === 'string') {
+          await deliverSMS(data.phone, body);
           notif.status = 'sent';
           notif.sentAt = new Date();
-        } else if (channel === 'push' && data.pushSubscription) {
-          await deliverPush(
-            data.pushSubscription as PushSubscription,
-            { title: subject, body, type }
-          );
+        } else if (channel === 'push' && data.pushSubscription != null) {
+          await deliverPush(data.pushSubscription as PushSubscription, {
+            title: subject,
+            body,
+            type,
+          });
           notif.status = 'sent';
           notif.sentAt = new Date();
         } else {
