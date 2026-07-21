@@ -26,13 +26,9 @@ payrollRouter.get('/batches/:id', (req, res, next) => {
   PayrollController.getBatch(req, res).catch(next);
 });
 
-payrollRouter.post(
-  '/batches/:id/items',
-  validate(addItemSchema),
-  (req, res, next) => {
-    PayrollController.addItem(req, res).catch(next);
-  }
-);
+payrollRouter.post('/batches/:id/items', validate(addItemSchema), (req, res, next) => {
+  PayrollController.addItem(req, res).catch(next);
+});
 
 payrollRouter.post('/batches/:id/approve', (req, res, next) => {
   PayrollController.approveBatch(req, res).catch(next);

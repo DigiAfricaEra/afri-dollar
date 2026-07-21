@@ -125,11 +125,7 @@ async function consumeRedisLimit(
   };
 }
 
-function consumeMemoryLimit(
-  key: string,
-  config: RateLimitConfig,
-  now: number
-): RateLimitDecision {
+function consumeMemoryLimit(key: string, config: RateLimitConfig, now: number): RateLimitDecision {
   const windowStart = now - config.windowMs;
   const existing = memoryStore.get(key) ?? [];
   const requests = existing.filter((timestamp) => timestamp > windowStart);
@@ -194,7 +190,8 @@ async function applyRateLimit(
 ): Promise<void> {
   const now = Date.now();
   const key = getRateLimitKey(req, config);
-  const decision = (await consumeRedisLimit(key, config, now)) ?? consumeMemoryLimit(key, config, now);
+  const decision =
+    (await consumeRedisLimit(key, config, now)) ?? consumeMemoryLimit(key, config, now);
 
   setRateLimitHeaders(res, decision);
 

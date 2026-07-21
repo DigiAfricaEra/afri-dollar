@@ -24,9 +24,15 @@ fxRouter.get('/history', authMiddleware, generalRateLimiter, (req, res, next) =>
 
 const adminFxRouter = Router();
 
-adminFxRouter.post('/rates', authMiddleware, adminMiddleware, sensitiveRateLimiter, (req, res, next) => {
-  FXController.upsertRate(req, res).catch(next);
-});
+adminFxRouter.post(
+  '/rates',
+  authMiddleware,
+  adminMiddleware,
+  sensitiveRateLimiter,
+  (req, res, next) => {
+    FXController.upsertRate(req, res).catch(next);
+  }
+);
 
 adminFxRouter.delete(
   '/rates/:id',

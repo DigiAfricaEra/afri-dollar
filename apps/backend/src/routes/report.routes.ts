@@ -15,13 +15,25 @@ reportRouter.get('/', authMiddleware, generalRateLimiter, (req, res, next) => {
 });
 
 // Admin template routes (before /:id to avoid param collision)
-reportRouter.get('/templates', authMiddleware, adminMiddleware, generalRateLimiter, (req, res, next) => {
-  ReportController.listTemplates(req, res).catch(next);
-});
+reportRouter.get(
+  '/templates',
+  authMiddleware,
+  adminMiddleware,
+  generalRateLimiter,
+  (req, res, next) => {
+    ReportController.listTemplates(req, res).catch(next);
+  }
+);
 
-reportRouter.post('/templates', authMiddleware, adminMiddleware, sensitiveRateLimiter, (req, res, next) => {
-  ReportController.createTemplate(req, res).catch(next);
-});
+reportRouter.post(
+  '/templates',
+  authMiddleware,
+  adminMiddleware,
+  sensitiveRateLimiter,
+  (req, res, next) => {
+    ReportController.createTemplate(req, res).catch(next);
+  }
+);
 
 reportRouter.get(
   '/templates/:templateId',
