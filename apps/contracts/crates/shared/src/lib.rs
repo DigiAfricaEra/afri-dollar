@@ -211,7 +211,8 @@ pub fn cancel_upgrade(env: &Env, proposal_id: u64) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn rollback_upgrade(env: &Env, admin: &Address) { admin.require_auth(); -> Result<(), Error> {
+pub fn rollback_upgrade(env: &Env, admin: &Address) -> Result<(), Error> {
+    admin.require_auth();
     let stored_admin: Address = env
         .storage()
         .instance()
