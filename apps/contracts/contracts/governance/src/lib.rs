@@ -51,12 +51,19 @@
 //! therefore vote, transfer their tokens to a fresh address, and vote again
 //! from that address on the same proposal — the classic non-snapshot
 //! double-vote. Within a single address this is prevented (one [`Vote`] per
-//! `(voter, proposal)`), but cross-address transfer-and-revote is not. A
-//! production deployment should back governance with a checkpointed token or
-//! require holders to lock tokens for the voting window; both are out of scope
-//! for this contract, which focuses on the proposal/vote/delegate/execute
-//! lifecycle. This is documented rather than hidden so the tradeoff is
-//! explicit.
+//! `(voter, proposal)`), but cross-address transfer-and-revote is not. The same
+//! root cause admits a delegation variant: an address may vote its own balance
+//! on a proposal and *then* delegate that balance to another address, which can
+//! vote the same weight again on the same still-open proposal. All three are
+//! one problem — weight is read live rather than snapshotted per proposal — and
+//! cannot be closed with a local guard here: [`delegate`](GovernanceContract::delegate)
+//! is account-level and proposal-agnostic, so rejecting it would require an
+//! unbounded scan of every open proposal, and there is no per-proposal power to
+//! subtract from. A production deployment should back governance with a
+//! checkpointed token or require holders to lock tokens for the voting window;
+//! both are out of scope for this contract, which focuses on the
+//! proposal/vote/delegate/execute lifecycle. This is documented rather than
+//! hidden so the tradeoff is explicit.
 
 use afri_contract_shared::{
     extend_instance_ttl, INSTANCE_BUMP_AMOUNT, INSTANCE_LIFETIME_THRESHOLD,
@@ -294,6 +301,12 @@ fn has_passed(proposal: &Proposal) -> Result<bool, Error> {
         .for_votes
         .checked_add(proposal.against_votes)
         .ok_or(Error::Overflow)?;
+    // A proposal that drew no participation never passes, even if it was
+    // created with a zero `quorum` (which would otherwise satisfy the checks
+    // below with an all-zero tally).
+    if total == 0 {
+        return Ok(false);
+    }
     if total < proposal.quorum {
         return Ok(false);
     }

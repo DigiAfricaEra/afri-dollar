@@ -1,8 +1,9 @@
 use crate::{Error, GovernanceContract, GovernanceContractClient};
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
+    symbol_short,
+    testutils::{Address as _, Events, Ledger},
     token::StellarAssetClient,
-    Address, Env, String,
+    Address, Env, IntoVal, String, Symbol,
 };
 
 /// Deploy a Stellar Asset Contract to stand in for the governance token, and
@@ -38,6 +39,38 @@ fn set_time(env: &Env, t: u64) {
 
 fn text(env: &Env, s: &str) -> String {
     String::from_str(env, s)
+}
+
+/// The `"governance"` event namespace topic. It is 10 characters, so it cannot
+/// use `symbol_short!` (max 9) — the `#[contractevent]` macro builds it as a
+/// full `Symbol`, and the test assertions must match that encoding.
+fn gov(env: &Env) -> Symbol {
+    Symbol::new(env, "governance")
+}
+
+/// Assert that the governance contract's most recently emitted event has the
+/// given topics and data. Filters to just our own contract's events, since a
+/// mutating call also invokes the token contract (whose reads emit nothing, but
+/// filtering keeps the assertion robust), mirroring the `staking` tests.
+fn assert_last_event<T, D>(env: &Env, contract_id: &Address, topics: T, data: D)
+where
+    T: IntoVal<Env, soroban_sdk::Vec<soroban_sdk::Val>>,
+    D: IntoVal<Env, soroban_sdk::Val>,
+{
+    let expected: soroban_sdk::Vec<(
+        Address,
+        soroban_sdk::Vec<soroban_sdk::Val>,
+        soroban_sdk::Val,
+    )> = soroban_sdk::vec![
+        env,
+        (
+            contract_id.clone(),
+            topics.into_val(env),
+            data.into_val(env),
+        ),
+    ];
+    let ours = env.events().all().filter_by_contract(contract_id);
+    assert_eq!(ours, expected);
 }
 
 /// Create a standard proposal open for voting in `[100, 1000)` with the given
@@ -189,6 +222,13 @@ fn vote_is_token_weighted() {
     set_time(&env, 200);
     client.vote(&alice, &id, &true);
     client.vote(&bob, &id, &false);
+    // The most recent mutating call was Bob's against-vote.
+    assert_last_event(
+        &env,
+        &client.address,
+        (gov(&env), symbol_short!("vote"), id, bob),
+        (false, 300i128),
+    );
 
     let proposal = client.get_proposal(&id);
     assert_eq!(proposal.for_votes, 700);
@@ -198,6 +238,98 @@ fn vote_is_token_weighted() {
     assert_eq!(ballot.voting_power, 700);
     assert!(ballot.support);
     assert_eq!(ballot.timestamp, 200);
+}
+
+#[test]
+fn create_proposal_emits_event() {
+    let (env, client, _admin, mint) = setup();
+    let (id, proposer) = make_proposal(&env, &client, &mint, 100, 5_000);
+    assert_last_event(
+        &env,
+        &client.address,
+        (gov(&env), symbol_short!("proposal"), id, proposer),
+        (100u64, 1_000u64),
+    );
+}
+
+#[test]
+fn delegate_emits_event() {
+    let (env, client, _admin, mint) = setup();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    mint.mint(&alice, &400);
+
+    client.delegate(&alice, &bob);
+    assert_last_event(
+        &env,
+        &client.address,
+        (gov(&env), symbol_short!("delegate"), alice, bob),
+        // `Delegated` uses `data_format = "vec"` with a single field, so the
+        // payload is a one-element vec, not a bare scalar.
+        (400i128,),
+    );
+}
+
+#[test]
+fn execute_emits_event() {
+    let (env, client, _admin, mint) = setup();
+    let (id, _proposer) = make_proposal(&env, &client, &mint, 100, 5_000);
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    mint.mint(&alice, &700);
+    mint.mint(&bob, &300);
+
+    set_time(&env, 200);
+    client.vote(&alice, &id, &true);
+    client.vote(&bob, &id, &false);
+
+    set_time(&env, 1_000);
+    client.execute_proposal(&id);
+    assert_last_event(
+        &env,
+        &client.address,
+        (gov(&env), symbol_short!("execute"), id),
+        (700i128, 300i128),
+    );
+}
+
+#[test]
+fn vote_requires_voter_auth() {
+    let (env, client, _admin, mint) = setup();
+    let (id, _proposer) = make_proposal(&env, &client, &mint, 100, 5_000);
+    let alice = Address::generate(&env);
+    mint.mint(&alice, &500);
+    set_time(&env, 200);
+    // Drop all authorizations: the voter's own signature must be required.
+    env.set_auths(&[]);
+    assert!(client.try_vote(&alice, &id, &true).is_err());
+}
+
+#[test]
+fn delegate_requires_delegator_auth() {
+    let (env, client, _admin, mint) = setup();
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    mint.mint(&alice, &400);
+    env.set_auths(&[]);
+    assert!(client.try_delegate(&alice, &bob).is_err());
+}
+
+#[test]
+fn execute_is_permissionless() {
+    let (env, client, _admin, mint) = setup();
+    let (id, _proposer) = make_proposal(&env, &client, &mint, 100, 5_000);
+    let alice = Address::generate(&env);
+    mint.mint(&alice, &600);
+    set_time(&env, 200);
+    client.vote(&alice, &id, &true);
+
+    set_time(&env, 1_000);
+    // No authorization provided: execution is intentionally open to anyone,
+    // so a passed proposal can still be finalized.
+    env.set_auths(&[]);
+    client.execute_proposal(&id);
+    assert!(client.get_proposal(&id).executed);
 }
 
 #[test]
@@ -314,6 +446,18 @@ fn execute_succeeds_when_quorum_and_threshold_met() {
     set_time(&env, 1_000);
     client.execute_proposal(&id);
     assert!(client.get_proposal(&id).executed);
+}
+
+#[test]
+fn execute_fails_with_zero_participation_even_at_zero_quorum() {
+    let (env, client, _admin, mint) = setup();
+    // Zero quorum, but nobody votes: the proposal must not pass.
+    let (id, _proposer) = make_proposal(&env, &client, &mint, 0, 5_000);
+    set_time(&env, 1_000);
+    assert_eq!(
+        client.try_execute_proposal(&id),
+        Err(Ok(Error::ProposalNotPassed))
+    );
 }
 
 #[test]
