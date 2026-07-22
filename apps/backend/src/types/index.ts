@@ -66,6 +66,13 @@ export class AppError extends Error {
   }
 }
 
+export class InvalidCredentialsError extends AppError {
+  constructor(message = 'Invalid credentials') {
+    super(401, message);
+    this.name = 'InvalidCredentialsError';
+  }
+}
+
 export interface TokenRefreshData {
   accessToken: string;
   refreshToken: string;

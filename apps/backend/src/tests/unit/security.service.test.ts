@@ -47,4 +47,75 @@ describe('SecurityService', () => {
 
     expect(await SecurityService.getFailedAttempt(ip)).toBeNull();
   });
+
+  describe('external IP reputation integration', () => {
+    const originalFetch = global.fetch;
+
+    afterEach(() => {
+      global.fetch = originalFetch;
+      delete process.env.IP_REPUTATION_SERVICE_URL;
+    });
+
+    it('queries and incorporates external IP reputation assessment when configured', async () => {
+      const ip = '203.0.113.20';
+      process.env.IP_REPUTATION_SERVICE_URL = 'https://ip-rep.example.com';
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          riskScore: 75,
+          flagged: true,
+          reasons: ['High risk proxy'],
+        }),
+      });
+
+      const assessment = await SecurityService.assessIpReputation(ip);
+
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://ip-rep.example.com?ip=203.0.113.20',
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
+      );
+      expect(assessment.riskScore).toBe(75);
+      expect(assessment.flagged).toBe(true);
+      expect(assessment.reasons).toContain('High risk proxy');
+    });
+
+    it('honors local brute-force evidence even if external provider returns low risk', async () => {
+      const ip = '203.0.113.21';
+      process.env.IP_REPUTATION_SERVICE_URL = 'https://ip-rep.example.com';
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          riskScore: 0,
+          flagged: false,
+          reasons: [],
+        }),
+      });
+
+      for (let i = 0; i < 5; i++) {
+        await SecurityService.recordFailedAttempt({ ip });
+      }
+
+      const assessment = await SecurityService.assessIpReputation(ip);
+
+      expect(assessment.flagged).toBe(true);
+      expect(assessment.riskScore).toBeGreaterThanOrEqual(80);
+      expect(assessment.reasons).toContain('Repeated failed login attempts detected');
+    });
+
+    it('degrades gracefully to local heuristics when external reputation service fails or times out', async () => {
+      const ip = '203.0.113.22';
+      process.env.IP_REPUTATION_SERVICE_URL = 'https://ip-rep.example.com';
+
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      global.fetch = jest.fn().mockRejectedValue(new Error('Network timeout'));
+
+      const assessment = await SecurityService.assessIpReputation(ip);
+
+      expect(assessment.source).toBe('local');
+      expect(assessment.ip).toBe(ip);
+      consoleSpy.mockRestore();
+    });
+  });
 });

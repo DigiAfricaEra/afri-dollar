@@ -10,7 +10,7 @@ export interface IpReputationAssessment {
   riskScore: number;
   flagged: boolean;
   reasons: string[];
-  source: 'local' | 'external';
+  source: 'local' | 'external' | 'combined';
 }
 
 export interface AuthSecurityDecision {

@@ -291,7 +291,8 @@ For support, email dev.mes.anonfedora@gmail.com or open an issue in the reposito
 
 ## Community
 
-Join the project community: [Telegram](https://t.me/DigiAfrcaEra/1)
+- **Telegram Channel**: [Telegram Channel](https://t.me/DigiAfrcaEra)
+- **Community Group**: [Telegram Community](https://t.me/DigiAfrcaEra/1)
 
 ## Acknowledgments
 

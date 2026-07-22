@@ -5,7 +5,7 @@ import { addDays } from 'date-fns';
 import { sign, verify } from 'jsonwebtoken';
 
 import prisma from '../config/database';
-import { AppError } from '../types';
+import { AppError, InvalidCredentialsError } from '../types';
 import type { RegisterRequest, TokenRefreshData, LoginRequest, JwtPayload } from '../types';
 
 const SALT_ROUNDS = 12;
@@ -139,12 +139,12 @@ export const AuthService = {
     });
 
     if (!user?.passwordHash) {
-      throw new AppError(401, 'Invalid credentials');
+      throw new InvalidCredentialsError();
     }
 
     const isPasswordValid = await this.verifyPassword(data.password, user.passwordHash);
     if (!isPasswordValid) {
-      throw new AppError(401, 'Invalid credentials');
+      throw new InvalidCredentialsError();
     }
 
     assertUserEligible(user);
