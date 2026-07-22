@@ -94,7 +94,8 @@ pub fn propose_upgrade(
     new_wasm_hash: BytesN<32>,
     delay_ledgers: u64,
 ) -> Result<u64, Error> {
-    proposer.require_auth(); let admin: Address = env
+    proposer.require_auth();
+    let admin: Address = env
         .storage()
         .instance()
         .get(&UpgradeDataKey::Admin)
