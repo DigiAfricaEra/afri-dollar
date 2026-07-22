@@ -6,6 +6,7 @@ import type { CreateWalletOptions, WalletWithKeys } from '../types';
 import { encrypt } from '../utils/crypto';
 
 import { StellarService } from './stellar.service';
+import { WebhookService } from './webhook.service';
 
 export const WalletService = {
   async createWallet(options: CreateWalletOptions): Promise<WalletWithKeys> {
@@ -35,6 +36,12 @@ export const WalletService = {
         walletType: options.walletType,
         network: options.network,
       },
+    });
+
+    await WebhookService.emitEvent({
+      eventType: 'wallet.created',
+      payload: { walletId: wallet.id, walletType: wallet.walletType, network: wallet.network },
+      userId: options.userId,
     });
 
     return {

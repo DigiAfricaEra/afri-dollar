@@ -5,6 +5,8 @@ import cors from 'cors';
 import { config } from 'dotenv';
 import express, { json, urlencoded } from 'express';
 import helmet from 'helmet';
+import swaggerJsdoc from 'swagger-jsdoc';
+import swaggerUi from 'swagger-ui-express';
 
 // Express's RequestHandler uses `any` as default generic params, which triggers
 // @typescript-eslint/no-unsafe-argument. This interface provides non-any types.
@@ -12,6 +14,7 @@ interface MountableRouter {
   (req: express.Request, res: express.Response, next: express.NextFunction): void;
 }
 import prisma from './config/database';
+import swaggerOptions from './config/swagger';
 import { errorMiddleware } from './middleware/error.middleware';
 import adminRouter from './routes/admin.routes';
 import auditRouter from './routes/audit.routes';
@@ -25,8 +28,10 @@ import securityRouter from './routes/security.routes';
 import stellarRouter from './routes/stellar.routes';
 import treasuryRouter from './routes/treasury.routes';
 import walletRouter from './routes/wallet.routes';
+import webhookRouter from './routes/webhook.routes';
 import { jobQueueService } from './services/job-queue.service';
 import { reportWorker } from './services/report-worker.service';
+import { webhookDeliveryWorker } from './services/webhook-delivery.worker';
 // Load backend-level .env file
 config({ path: path.resolve(__dirname, '../.env') });
 
@@ -38,6 +43,18 @@ let httpServer: Server | null = null;
 // Export prisma for easy access
 export { prisma };
 export { app };
+
+// Swagger/OpenAPI documentation — mounted before Helmet so Swagger UI's
+// inline scripts and styles are not blocked by the default CSP.
+// Gated behind NODE_ENV so the docs endpoints are not exposed in production.
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
+
+if (process.env.NODE_ENV !== 'production') {
+  app.get('/api/v1/docs.json', (_req, res) => {
+    res.json(swaggerSpec);
+  });
+  app.use('/api/v1/docs', swaggerUi.serveFiles(swaggerSpec), swaggerUi.setup(swaggerSpec));
+}
 
 // Middleware
 app.use(helmet());
@@ -99,6 +116,9 @@ app.use('/api/v1/jobs', jobRouter as MountableRouter);
 // Report routes
 app.use('/api/v1/reports', reportRouter as MountableRouter);
 
+// Webhook routes
+app.use('/api/v1/webhooks', webhookRouter as MountableRouter);
+
 // Global error handler
 app.use(errorMiddleware);
 
@@ -111,6 +131,7 @@ async function startServer(): Promise<void> {
 
     await jobQueueService.start();
     await reportWorker.start();
+    await webhookDeliveryWorker.start();
 
     httpServer = app.listen(PORT, () => {
       console.log(`🚀 AfriDollar Backend API running on port ${PORT}`);
@@ -147,6 +168,7 @@ function shutdown(signal: 'SIGTERM' | 'SIGINT'): void {
   void closeHttpServer()
     .then(() => jobQueueService.stop())
     .then(() => reportWorker.stop())
+    .then(() => webhookDeliveryWorker.stop())
     .then(() => prisma.$disconnect())
     .catch((error) => {
       console.error('Graceful shutdown failed:', error);

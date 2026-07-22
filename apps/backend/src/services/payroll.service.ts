@@ -13,6 +13,7 @@ import prisma from '../config/database';
 import { decrypt } from '../utils/crypto';
 
 import { StellarService } from './stellar.service';
+import { WebhookService } from './webhook.service';
 
 export interface CreatePayrollBatchOptions {
   name: string;
@@ -571,6 +572,17 @@ export const PayrollService = {
       total: result.total,
       successful: result.successful,
       failed: result.failed,
+    });
+
+    await WebhookService.emitEvent({
+      eventType: 'payroll.processed',
+      payload: {
+        batchId,
+        total: result.total,
+        successful: result.successful,
+        failed: result.failed,
+      },
+      userId,
     });
 
     return result;

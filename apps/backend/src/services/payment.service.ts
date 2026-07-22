@@ -19,6 +19,7 @@ import type {
 import { decrypt } from '../utils/crypto';
 
 import { StellarService } from './stellar.service';
+import { WebhookService } from './webhook.service';
 
 const server = StellarService.getHorizonServer();
 
@@ -337,6 +338,16 @@ export const PaymentService = {
         stellarTxId: response.hash,
       });
 
+      await WebhookService.emitEvent({
+        eventType: 'transaction.completed',
+        payload: {
+          transactionId: updatedTx.id,
+          amount: updatedTx.amount,
+          assetCode: updatedTx.assetCode,
+        },
+        userId,
+      });
+
       return mapToPaymentStatus(updatedTx);
     } catch (stellarError: unknown) {
       const errorMsg = getHorizonErrorMessage(stellarError);
@@ -351,6 +362,12 @@ export const PaymentService = {
 
       await logAudit(userId, 'payment_process_failed', paymentId, false, {
         error: errorMsg,
+      });
+
+      await WebhookService.emitEvent({
+        eventType: 'transaction.failed',
+        payload: { transactionId: updatedTx.id, error: errorMsg },
+        userId,
       });
 
       return mapToPaymentStatus(updatedTx);

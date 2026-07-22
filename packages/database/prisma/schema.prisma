@@ -83,6 +83,7 @@ model User {
   refreshTokens     RefreshToken[]
   reportRequests    ReportRequest[]
   complianceAlerts  ComplianceAlert[]
+  webhookConfigs    WebhookConfig[]
 
   @@index([email])
   @@index([walletAddress])
@@ -422,4 +423,45 @@ model SystemConfig {
   updatedBy   String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+}
+
+model WebhookConfig {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  url       String
+  events    String[]
+  secret    String
+  active    Boolean  @default(true)
+  headers   Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([userId])
+  @@index([active])
+}
+
+model WebhookDelivery {
+  id           String    @id @default(cuid())
+  webhookId    String
+  webhook      WebhookConfig @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  eventType    String
+  payload      Json
+  statusCode   Int?
+  response     String?
+  error        String?
+  attemptCount Int       @default(0)
+  maxAttempts  Int       @default(5)
+  status       String    @default("pending")
+  nextRetryAt  DateTime?
+  deliveredAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([webhookId])
+  @@index([status])
+  @@index([nextRetryAt])
+  @@index([webhookId, createdAt])
 }
