@@ -145,6 +145,19 @@ fn put_providers(env: &Env, providers: &Vec<Address>) {
     env.storage().instance().set(&DataKey::Providers, providers);
 }
 
+fn canonical_pair(asset_a: Address, asset_b: Address) -> (Address, Address) {
+    if asset_a <= asset_b {
+        (asset_a, asset_b)
+    } else {
+        (asset_b, asset_a)
+    }
+}
+
+fn price_key(asset_a: Address, asset_b: Address, provider: Address) -> DataKey {
+    let (asset_a, asset_b) = canonical_pair(asset_a, asset_b);
+    DataKey::Price(asset_a, asset_b, provider)
+}
+
 #[contract]
 pub struct OracleContract;
 
@@ -165,14 +178,11 @@ impl OracleContract {
 
     pub fn register_provider(
         env: Env,
+        admin: Address,
         provider: Address,
         max_staleness_seconds: u64,
     ) -> Result<(), OracleError> {
-        env.storage()
-            .instance()
-            .get::<_, Address>(&DataKey::Admin)
-            .ok_or(OracleError::NotInitialized)?;
-        provider.require_auth();
+        require_admin(&env, &admin)?;
 
         if env
             .storage()
@@ -257,6 +267,7 @@ impl OracleContract {
             return Err(OracleError::InvalidPrice);
         }
 
+        let (asset_a, asset_b) = canonical_pair(asset_a, asset_b);
         let timestamp = env.ledger().timestamp();
         let data = PriceData {
             asset_a: asset_a.clone(),
@@ -266,7 +277,7 @@ impl OracleContract {
             timestamp,
             provider: provider.clone(),
         };
-        let key = DataKey::Price(asset_a.clone(), asset_b.clone(), provider.clone());
+        let key = price_key(asset_a.clone(), asset_b.clone(), provider.clone());
         env.storage().persistent().set(&key, &data);
         extend_persistent_ttl(&env, &key);
         extend_instance_ttl(&env);
@@ -288,20 +299,17 @@ impl OracleContract {
         asset_a: Address,
         asset_b: Address,
     ) -> Result<PriceData, OracleError> {
+        let (asset_a, asset_b) = canonical_pair(asset_a, asset_b);
         let mut newest: Option<PriceData> = None;
         for provider in providers(&env).iter() {
             let Ok(config) = validate_provider(&env, &provider) else {
                 continue;
             };
-            let Some(price) = env
-                .storage()
-                .persistent()
-                .get::<_, PriceData>(&DataKey::Price(
-                    asset_a.clone(),
-                    asset_b.clone(),
-                    provider.clone(),
-                ))
-            else {
+            let Some(price) = env.storage().persistent().get::<_, PriceData>(&price_key(
+                asset_a.clone(),
+                asset_b.clone(),
+                provider.clone(),
+            )) else {
                 continue;
             };
             if ensure_fresh(&env, &price, &config).is_err() {
@@ -340,6 +348,7 @@ impl OracleContract {
         asset_a: Address,
         asset_b: Address,
     ) -> Result<PriceData, OracleError> {
+        let (asset_a, asset_b) = canonical_pair(asset_a, asset_b);
         let mut total: i128 = 0;
         let mut count: i128 = 0;
         let mut decimals: Option<u32> = None;
@@ -350,15 +359,11 @@ impl OracleContract {
             let Ok(config) = validate_provider(&env, &provider) else {
                 continue;
             };
-            let Some(price) = env
-                .storage()
-                .persistent()
-                .get::<_, PriceData>(&DataKey::Price(
-                    asset_a.clone(),
-                    asset_b.clone(),
-                    provider.clone(),
-                ))
-            else {
+            let Some(price) = env.storage().persistent().get::<_, PriceData>(&price_key(
+                asset_a.clone(),
+                asset_b.clone(),
+                provider.clone(),
+            )) else {
                 continue;
             };
             if ensure_fresh(&env, &price, &config).is_err() {
