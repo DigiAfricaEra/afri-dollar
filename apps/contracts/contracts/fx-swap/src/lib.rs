@@ -150,14 +150,23 @@ fn pool_id_key(a: &Address, b: &Address) -> DataKey {
 }
 
 fn get_pool_id(env: &Env, a: &Address, b: &Address) -> Result<u64, Error> {
-    env.storage()
+    let key = pool_id_key(a, b);
+    let id = env
+        .storage()
         .persistent()
-        .get(&pool_id_key(a, b))
-        .ok_or(Error::PoolNotFound)
+        .get(&key)
+        .ok_or(Error::PoolNotFound)?;
+    extend_persistent_ttl(env, &key);
+    Ok(id)
 }
 
 fn read_pool(env: &Env, pool_id: u64) -> Option<PoolInfo> {
-    env.storage().persistent().get(&DataKey::Pool(pool_id))
+    let key = DataKey::Pool(pool_id);
+    let pool = env.storage().persistent().get(&key);
+    if pool.is_some() {
+        extend_persistent_ttl(env, &key);
+    }
+    pool
 }
 
 fn write_pool(env: &Env, pool: &PoolInfo) {
@@ -167,10 +176,12 @@ fn write_pool(env: &Env, pool: &PoolInfo) {
 }
 
 fn read_lp_balance(env: &Env, pool_id: u64, provider: &Address) -> i128 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::LpBalance(pool_id, provider.clone()))
-        .unwrap_or(0)
+    let key = DataKey::LpBalance(pool_id, provider.clone());
+    let balance = env.storage().persistent().get(&key).unwrap_or(0);
+    if balance != 0 {
+        extend_persistent_ttl(env, &key);
+    }
+    balance
 }
 
 fn write_lp_balance(env: &Env, pool_id: u64, provider: &Address, amount: i128) {
@@ -220,6 +231,17 @@ fn compute_amount_out(amount_in: i128, reserve_in: i128, reserve_out: i128) -> R
 // Contract
 // ===========================================================================
 
+/// FX Swap — constant-product AMM (x·y = k) for AfriDollar.
+///
+/// # Design notes
+/// - **Admin is immutable.** Once set by `initialize`, it cannot be changed.
+///   Upgradeability and admin rotation are outside the scope of Issue #98.
+/// - **Minimum liquidity.** The first depositor receives `sqrt(k) - 1000` LP
+///   tokens; the remaining 1000 are minted to the contract itself and
+///   permanently locked (no function can withdraw them), matching Uniswap V2.
+/// - **Canonical ordering.** Pools are keyed by canonically sorted
+///   `(asset_0, asset_1)` where `asset_0 < asset_1`. All entrypoints accept
+///   either caller ordering.
 #[contract]
 pub struct FxSwapContract;
 
@@ -301,17 +323,21 @@ impl FxSwapContract {
         let pool_id = get_pool_id(&env, &asset_a, &asset_b)?;
         let mut pool = read_pool(&env, pool_id).ok_or(Error::PoolNotFound)?;
 
-        if asset_a != pool.asset_a || asset_b != pool.asset_b {
+        let (amount_a, amount_b) = if asset_a == pool.asset_a && asset_b == pool.asset_b {
+            (amount_a, amount_b)
+        } else if asset_a == pool.asset_b && asset_b == pool.asset_a {
+            (amount_b, amount_a)
+        } else {
             return Err(Error::PoolNotFound);
-        }
+        };
 
         // Transfer tokens from LP to contract
-        TokenClient::new(&env, &asset_a).transfer(
+        TokenClient::new(&env, &pool.asset_a).transfer(
             &lp,
             MuxedAddress::from(env.current_contract_address()),
             &amount_a,
         );
-        TokenClient::new(&env, &asset_b).transfer(
+        TokenClient::new(&env, &pool.asset_b).transfer(
             &lp,
             MuxedAddress::from(env.current_contract_address()),
             &amount_b,
@@ -322,16 +348,23 @@ impl FxSwapContract {
             let product = (amount_a as u128)
                 .checked_mul(amount_b as u128)
                 .ok_or(Error::Overflow)?;
-            let sqrt_product = sqrt(product as i128);
-            lp_tokens = sqrt_product
-                .checked_sub(MINIMUM_LIQUIDITY)
-                .ok_or(Error::MinimumLiquidity)?;
-            if lp_tokens <= 0 {
+            let sqrt_product = {
+                let p = i128::try_from(product).map_err(|_| Error::Overflow)?;
+                sqrt(p)
+            };
+            if sqrt_product < MINIMUM_LIQUIDITY {
                 return Err(Error::MinimumLiquidity);
             }
-            pool.lp_token_supply = lp_tokens;
+            lp_tokens = sqrt_product - MINIMUM_LIQUIDITY;
+            pool.lp_token_supply = sqrt_product;
             pool.reserve_a = amount_a;
             pool.reserve_b = amount_b;
+            write_lp_balance(
+                &env,
+                pool_id,
+                &env.current_contract_address(),
+                MINIMUM_LIQUIDITY,
+            );
         } else {
             let share_a = amount_a
                 .checked_mul(pool.lp_token_supply)
@@ -363,7 +396,12 @@ impl FxSwapContract {
 
         write_pool(&env, &pool);
         let existing_lp = read_lp_balance(&env, pool_id, &lp);
-        write_lp_balance(&env, pool_id, &lp, existing_lp + lp_tokens);
+        write_lp_balance(
+            &env,
+            pool_id,
+            &lp,
+            existing_lp.checked_add(lp_tokens).ok_or(Error::Overflow)?,
+        );
         extend_instance_ttl(&env);
 
         LiquidityAdded {
@@ -393,9 +431,13 @@ impl FxSwapContract {
         let pool_id = get_pool_id(&env, &asset_a, &asset_b)?;
         let mut pool = read_pool(&env, pool_id).ok_or(Error::PoolNotFound)?;
 
-        if asset_a != pool.asset_a || asset_b != pool.asset_b {
+        let (asset_a, asset_b) = if asset_a == pool.asset_a && asset_b == pool.asset_b {
+            (asset_a, asset_b)
+        } else if asset_a == pool.asset_b && asset_b == pool.asset_a {
+            (asset_b, asset_a)
+        } else {
             return Err(Error::PoolNotFound);
-        }
+        };
 
         let lp_balance = read_lp_balance(&env, pool_id, &lp);
         if lp_balance < liquidity_tokens {
@@ -444,7 +486,9 @@ impl FxSwapContract {
             .ok_or(Error::Overflow)?;
 
         write_pool(&env, &pool);
-        let remaining = lp_balance - liquidity_tokens;
+        let remaining = lp_balance
+            .checked_sub(liquidity_tokens)
+            .ok_or(Error::Overflow)?;
         write_lp_balance(&env, pool_id, &lp, remaining);
         extend_instance_ttl(&env);
 
