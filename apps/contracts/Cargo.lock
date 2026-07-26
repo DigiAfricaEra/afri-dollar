@@ -738,6 +738,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fx-swap"
+version = "0.1.0"
+dependencies = [
+ "afri-contract-shared",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
