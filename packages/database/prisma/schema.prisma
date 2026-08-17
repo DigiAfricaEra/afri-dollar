@@ -181,6 +181,10 @@ model Transaction {
   flagReason      String?
   flaggedAt       DateTime?
   flaggedBy       String?
+  flagReviewAction String? // 'reviewing', 'release', 'block'
+  resolvedBy      String?
+  resolvedAt      DateTime?
+  resolutionNote  String?
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -190,10 +194,12 @@ model Transaction {
   complianceAlerts ComplianceAlert[]
 
   @@index([userId])
+  @@index([userId, createdAt])
   @@index([walletId])
   @@index([status])
   @@index([stellarTxId])
   @@index([isFlagged])
+  @@index([flagReviewAction])
 }
 
 // KYC records for compliance
@@ -392,6 +398,7 @@ model ComplianceAlert {
   id              String                @id @default(cuid())
   type            String                // 'kyc', 'sanctions', 'travel_rule', 'aml', etc.
   severity        String                @default("medium") // 'low', 'medium', 'high', 'critical'
+  ruleId          String?               // monitoring rule that triggered the alert
   status          ComplianceAlertStatus @default(open)
   title           String
   description     String?
@@ -411,6 +418,7 @@ model ComplianceAlert {
   @@index([type])
   @@index([userId])
   @@index([transactionId])
+  @@index([ruleId])
   @@index([createdAt])
 }
 

@@ -24,9 +24,8 @@ jest.mock('@stellar/stellar-sdk', () => {
   };
 });
 
-jest.mock('../../config/database', () => ({
-  __esModule: true,
-  default: {
+jest.mock('../../config/database', () => {
+  const client: Record<string, unknown> = {
     wallet: {
       findUnique: jest.fn(),
     },
@@ -39,12 +38,36 @@ jest.mock('../../config/database', () => ({
       findMany: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
+      count: jest.fn(),
+    },
+    systemConfig: {
+      findMany: jest.fn(),
+    },
+    complianceAlert: {
+      create: jest.fn(),
     },
     auditLog: {
       create: jest.fn(),
     },
-  },
-}));
+  };
+
+  client.$transaction = jest.fn(async (arg: unknown) => {
+    if (typeof arg === 'function') {
+      return (arg as (tx: unknown) => Promise<unknown>)(client);
+    }
+
+    if (Array.isArray(arg)) {
+      return Promise.all(arg);
+    }
+
+    throw new TypeError('Unsupported $transaction argument');
+  });
+
+  return {
+    __esModule: true,
+    default: client,
+  };
+});
 
 const mockWalletFindUnique = prisma.wallet.findUnique as jest.Mock;
 const mockUserFindUnique = prisma.user.findUnique as jest.Mock;
@@ -53,6 +76,9 @@ const mockTransactionFindUnique = prisma.transaction.findUnique as jest.Mock;
 const mockTransactionFindMany = prisma.transaction.findMany as jest.Mock;
 const mockTransactionUpdate = prisma.transaction.update as jest.Mock;
 const mockTransactionUpdateMany = prisma.transaction.updateMany as jest.Mock;
+const mockTransactionCount = prisma.transaction.count as jest.Mock;
+const mockSystemConfigFindMany = prisma.systemConfig.findMany as jest.Mock;
+const mockComplianceAlertCreate = prisma.complianceAlert.create as jest.Mock;
 const mockAuditLogCreate = prisma.auditLog.create as jest.Mock;
 
 describe('PaymentService', () => {
@@ -83,6 +109,11 @@ describe('PaymentService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockAuditLogCreate.mockResolvedValue({});
+    mockSystemConfigFindMany.mockResolvedValue([]);
+    mockTransactionCount.mockResolvedValue(0);
+    mockTransactionFindMany.mockResolvedValue([]);
+    mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
+    mockComplianceAlertCreate.mockResolvedValue({});
   });
 
   describe('createCrossBorderPayment', () => {
@@ -313,6 +344,169 @@ describe('PaymentService', () => {
 
       expect(result.complianceChecks.travelRule).toBe('passed');
       expect(result.complianceChecks.sanctionsScreening).toBe('passed');
+      expect(mockTransactionUpdate).not.toHaveBeenCalled();
+      expect(mockComplianceAlertCreate).not.toHaveBeenCalled();
+    });
+
+    it('should auto-flag a large transaction and create a compliance alert', async () => {
+      mockWalletFindUnique.mockResolvedValue({
+        id: mockWalletId,
+        userId: mockUserId,
+        publicKey: mockPublicKey,
+      });
+      mockUserFindUnique.mockResolvedValue({
+        id: mockUserId,
+        isVerified: true,
+        kycRecords: [],
+      });
+      const mockTx = {
+        id: 'tx-large',
+        status: 'created',
+        stellarTxId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        completedAt: null,
+        errorMessage: null,
+        walletId: mockWalletId,
+        userId: mockUserId,
+        amount: '15000',
+        assetCode: 'XLM',
+        assetIssuer: null,
+        toAddress: mockDestination,
+      };
+      mockTransactionCreate.mockResolvedValue(mockTx);
+
+      const result = await PaymentService.createCrossBorderPayment(
+        {
+          ...baseOptions,
+          amount: '15000',
+          beneficiaryInfo: { name: 'Supplier Co', country: 'NG' },
+        },
+        mockUserId
+      );
+
+      expect(result.payment.id).toBe('tx-large');
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'tx-large', isFlagged: false },
+          data: expect.objectContaining({
+            isFlagged: true,
+            flaggedBy: 'monitoring',
+          }),
+        })
+      );
+      expect(mockComplianceAlertCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            transactionId: 'tx-large',
+            ruleId: 'LARGE_TX',
+            severity: 'high',
+          }),
+        })
+      );
+    });
+
+    it('should flag a transaction matching a high risk destination country', async () => {
+      mockWalletFindUnique.mockResolvedValue({
+        id: mockWalletId,
+        userId: mockUserId,
+        publicKey: mockPublicKey,
+      });
+      mockUserFindUnique.mockResolvedValue({
+        id: mockUserId,
+        isVerified: true,
+        kycRecords: [],
+      });
+      const mockTx = {
+        id: 'tx-country',
+        status: 'created',
+        stellarTxId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        completedAt: null,
+        errorMessage: null,
+        walletId: mockWalletId,
+        userId: mockUserId,
+        amount: '500',
+        assetCode: 'XLM',
+        assetIssuer: null,
+        toAddress: mockDestination,
+        metadata: {
+          paymentType: 'cross_border',
+          beneficiaryInfo: { name: 'Importer', country: 'VE' },
+        },
+      };
+      mockTransactionCreate.mockResolvedValue(mockTx);
+
+      await PaymentService.createCrossBorderPayment(
+        {
+          ...baseOptions,
+          amount: '500',
+          beneficiaryInfo: { name: 'Importer', country: 'VE' },
+        },
+        mockUserId
+      );
+
+      expect(mockComplianceAlertCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            ruleId: 'HIGH_RISK_COUNTRY',
+            severity: 'high',
+          }),
+        })
+      );
+    });
+
+    it('should flag the payment for manual review when monitoring fails', async () => {
+      mockWalletFindUnique.mockResolvedValue({
+        id: mockWalletId,
+        userId: mockUserId,
+        publicKey: mockPublicKey,
+      });
+      mockUserFindUnique.mockResolvedValue({
+        id: mockUserId,
+        isVerified: true,
+        kycRecords: [],
+      });
+      const mockTx = {
+        id: 'tx-monitor-fail',
+        status: 'created',
+        stellarTxId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        completedAt: null,
+        errorMessage: null,
+        walletId: mockWalletId,
+        userId: mockUserId,
+        amount: '100',
+        assetCode: 'XLM',
+        assetIssuer: null,
+        toAddress: mockDestination,
+      };
+      mockTransactionCreate.mockResolvedValue(mockTx);
+      mockTransactionCount.mockRejectedValue(new Error('database unavailable'));
+
+      const result = await PaymentService.createCrossBorderPayment(baseOptions, mockUserId);
+
+      expect(result.payment.id).toBe('tx-monitor-fail');
+      expect(mockTransactionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'tx-monitor-fail' },
+          data: expect.objectContaining({
+            isFlagged: true,
+            flaggedBy: 'monitoring',
+          }),
+        })
+      );
+      expect(mockAuditLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'payment_create_monitor_failed',
+            resourceId: 'tx-monitor-fail',
+            success: false,
+          }),
+        })
+      );
     });
 
     it('should require asset issuer for non-XLM assets', async () => {
@@ -488,6 +682,101 @@ describe('PaymentService', () => {
 
       await expect(PaymentService.processPayment('tx-1', mockUserId)).rejects.toThrow(
         'Only created payments can be processed'
+      );
+    });
+
+    it('should reject a flagged payment awaiting compliance review', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: crossBorderMetadata,
+        isFlagged: true,
+        flagReviewAction: null,
+        wallet: { secretKeyEncrypted: mockSecretEncrypted },
+      });
+
+      await expect(PaymentService.processPayment('tx-1', mockUserId)).rejects.toThrow(
+        'Payment is flagged for compliance review'
+      );
+      expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
+    });
+
+    it('should reject a flagged payment being reviewed', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: crossBorderMetadata,
+        isFlagged: true,
+        flagReviewAction: 'reviewing',
+        wallet: { secretKeyEncrypted: mockSecretEncrypted },
+      });
+
+      await expect(PaymentService.processPayment('tx-1', mockUserId)).rejects.toThrow(
+        'Payment is flagged for compliance review'
+      );
+      expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
+      expect(mockAuditLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'payment_process_blocked',
+            resourceId: 'tx-1',
+            success: false,
+            metadata: expect.objectContaining({
+              reason: 'flagged_for_compliance_review',
+              flagReviewAction: 'reviewing',
+            }),
+          }),
+        })
+      );
+    });
+
+    it('should reject a blocked payment', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: crossBorderMetadata,
+        isFlagged: true,
+        flagReviewAction: 'block',
+        wallet: { secretKeyEncrypted: mockSecretEncrypted },
+      });
+
+      await expect(PaymentService.processPayment('tx-1', mockUserId)).rejects.toThrow(
+        'Payment is blocked by compliance review'
+      );
+      expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
+      expect(mockAuditLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'payment_process_blocked',
+            resourceId: 'tx-1',
+            success: false,
+            metadata: expect.objectContaining({
+              reason: 'blocked_by_compliance_review',
+              flagReviewAction: 'block',
+            }),
+          }),
+        })
+      );
+    });
+
+    it('should allow processing a released flagged payment', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: crossBorderMetadata,
+        isFlagged: true,
+        flagReviewAction: 'release',
+        wallet: { secretKeyEncrypted: 'invalid:encrypted:data' },
+      });
+      mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
+      mockTransactionUpdate.mockResolvedValue({});
+
+      await expect(PaymentService.processPayment('tx-1', mockUserId)).rejects.toThrow(
+        'Wallet decryption failure'
       );
     });
 

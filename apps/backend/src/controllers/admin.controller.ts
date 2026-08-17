@@ -74,7 +74,7 @@ const updateConfigSchema = z.object({
     .max(50),
 });
 
-function handleError(res: Response, error: unknown): void {
+export function handleError(res: Response, error: unknown): void {
   if (error instanceof z.ZodError) {
     res.status(400).json({
       success: false,
@@ -99,7 +99,7 @@ function handleError(res: Response, error: unknown): void {
   });
 }
 
-function requireUser(req: AuthRequest, res: Response): string | null {
+export function requireUser(req: AuthRequest, res: Response): string | null {
   if (!req.user) {
     res.status(401).json({
       success: false,
@@ -110,7 +110,7 @@ function requireUser(req: AuthRequest, res: Response): string | null {
   return req.user.userId;
 }
 
-function getRequestContext(req: AuthRequest): { ipAddress?: string; userAgent?: string } {
+export function getRequestContext(req: AuthRequest): { ipAddress?: string; userAgent?: string } {
   return {
     ipAddress: req.ip,
     userAgent: req.get('user-agent') || undefined,

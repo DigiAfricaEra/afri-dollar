@@ -1,6 +1,7 @@
 import { Router } from 'express';
 
 import { AdminController } from '../controllers/admin.controller';
+import { FlaggedTransactionController } from '../controllers/flagged-transaction.controller';
 import { adminMiddleware, authMiddleware } from '../middleware/auth.middleware';
 import { sensitiveRateLimiter } from '../middleware/rate-limit.middleware';
 
@@ -30,6 +31,14 @@ adminRouter.get('/users/:id/activity', (req, res, next) => {
 });
 
 // Transaction monitoring — static paths before parameterized routes
+adminRouter.get('/transactions/flagged/stats', (req, res, next) => {
+  FlaggedTransactionController.getFlaggedStats(req, res).catch(next);
+});
+
+adminRouter.get('/transactions/flagged', (req, res, next) => {
+  FlaggedTransactionController.listFlagged(req, res).catch(next);
+});
+
 adminRouter.get('/transactions/alerts', (req, res, next) => {
   AdminController.getTransactionAlerts(req, res).catch(next);
 });
@@ -44,6 +53,10 @@ adminRouter.get('/transactions/:id', (req, res, next) => {
 
 adminRouter.post('/transactions/:id/flag', (req, res, next) => {
   AdminController.flagTransaction(req, res).catch(next);
+});
+
+adminRouter.post('/transactions/:id/review', (req, res, next) => {
+  FlaggedTransactionController.reviewTransaction(req, res).catch(next);
 });
 
 // Compliance

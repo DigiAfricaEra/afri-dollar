@@ -19,6 +19,7 @@ import type {
 import { decrypt } from '../utils/crypto';
 
 import { StellarService } from './stellar.service';
+import { TransactionMonitorService } from './transaction-monitor.service';
 import { WebhookService } from './webhook.service';
 
 const server = StellarService.getHorizonServer();
@@ -82,6 +83,29 @@ async function logAudit(
   }
 }
 
+/**
+ * Rejects processing when the payment is flagged and not released, auditing
+ * the compliance block before throwing.
+ */
+async function assertPaymentNotComplianceBlocked(
+  userId: string,
+  paymentId: string,
+  transaction: Transaction
+): Promise<void> {
+  if (!transaction.isFlagged || transaction.flagReviewAction === 'release') {
+    return;
+  }
+
+  const blocked = transaction.flagReviewAction === 'block';
+  await logAudit(userId, 'payment_process_blocked', paymentId, false, {
+    reason: blocked ? 'blocked_by_compliance_review' : 'flagged_for_compliance_review',
+    flagReviewAction: transaction.flagReviewAction,
+  });
+  throw new Error(
+    blocked ? 'Payment is blocked by compliance review' : 'Payment is flagged for compliance review'
+  );
+}
+
 const SANCTIONED_COUNTRIES = ['KP', 'IR', 'SY', 'CU'];
 
 async function performSanctionsScreening(
@@ -134,6 +158,11 @@ async function performComplianceChecks(
 }
 
 export const PaymentService = {
+  /**
+   * Creates a cross-border payment, running AML screening and transaction
+   * monitoring, and flagging the payment for manual review when monitoring
+   * fails.
+   */
   async createCrossBorderPayment(
     options: CreateCrossBorderPaymentOptions,
     userId: string
@@ -222,12 +251,46 @@ export const PaymentService = {
       },
     });
 
-    await logAudit(userId, 'payment_create', transaction.id, true, {
-      amount: options.amount,
-      assetCode: options.assetCode,
-      destinationAddress: options.destinationAddress,
-      purpose: options.purpose,
-    });
+    let monitorError: unknown;
+    try {
+      const monitorResult = await TransactionMonitorService.evaluate(transaction);
+      if (monitorResult.flagged) {
+        await TransactionMonitorService.applyFlags(transaction, monitorResult);
+      }
+    } catch (error) {
+      monitorError = error;
+      console.error('Transaction monitoring failed; flagging payment for manual review:', error);
+      try {
+        await prisma.transaction.update({
+          where: { id: transaction.id },
+          data: {
+            isFlagged: true,
+            flagReason: 'Monitoring error - payment requires manual review',
+            flaggedAt: new Date(),
+            flaggedBy: 'monitoring',
+          },
+        });
+      } catch (flagError) {
+        console.error('Failed to flag payment after monitoring error:', flagError);
+      }
+    }
+
+    if (monitorError !== undefined) {
+      const monitorErrorMessage =
+        monitorError instanceof Error ? monitorError.message : JSON.stringify(monitorError);
+      await logAudit(userId, 'payment_create_monitor_failed', transaction.id, false, {
+        amount: options.amount,
+        assetCode: options.assetCode,
+        error: monitorErrorMessage,
+      });
+    } else {
+      await logAudit(userId, 'payment_create', transaction.id, true, {
+        amount: options.amount,
+        assetCode: options.assetCode,
+        destinationAddress: options.destinationAddress,
+        purpose: options.purpose,
+      });
+    }
 
     return {
       payment: mapToPaymentStatus(transaction),
@@ -243,6 +306,10 @@ export const PaymentService = {
     };
   },
 
+  /**
+   * Processes a created cross-border payment, enforcing the compliance
+   * review gate before claiming the payment for processing.
+   */
   async processPayment(paymentId: string, userId: string): Promise<PaymentStatus> {
     const transaction = await prisma.transaction.findUnique({
       where: { id: paymentId },
@@ -261,6 +328,8 @@ export const PaymentService = {
     if (transaction.status !== 'created') {
       throw new Error('Only created payments can be processed');
     }
+
+    await assertPaymentNotComplianceBlocked(userId, paymentId, transaction);
 
     const updateCount = await prisma.transaction.updateMany({
       where: { id: paymentId, status: 'created' },
