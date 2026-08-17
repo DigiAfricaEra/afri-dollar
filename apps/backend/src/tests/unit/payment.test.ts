@@ -111,6 +111,8 @@ describe('PaymentService', () => {
     mockAuditLogCreate.mockResolvedValue({});
     mockSystemConfigFindMany.mockResolvedValue([]);
     mockTransactionCount.mockResolvedValue(0);
+    mockTransactionFindMany.mockResolvedValue([]);
+    mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
     mockComplianceAlertCreate.mockResolvedValue({});
   });
 
@@ -384,9 +386,9 @@ describe('PaymentService', () => {
       );
 
       expect(result.payment.id).toBe('tx-large');
-      expect(mockTransactionUpdate).toHaveBeenCalledWith(
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'tx-large' },
+          where: { id: 'tx-large', isFlagged: false },
           data: expect.objectContaining({
             isFlagged: true,
             flaggedBy: 'monitoring',
@@ -450,6 +452,58 @@ describe('PaymentService', () => {
           data: expect.objectContaining({
             ruleId: 'HIGH_RISK_COUNTRY',
             severity: 'high',
+          }),
+        })
+      );
+    });
+
+    it('should flag the payment for manual review when monitoring fails', async () => {
+      mockWalletFindUnique.mockResolvedValue({
+        id: mockWalletId,
+        userId: mockUserId,
+        publicKey: mockPublicKey,
+      });
+      mockUserFindUnique.mockResolvedValue({
+        id: mockUserId,
+        isVerified: true,
+        kycRecords: [],
+      });
+      const mockTx = {
+        id: 'tx-monitor-fail',
+        status: 'created',
+        stellarTxId: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        completedAt: null,
+        errorMessage: null,
+        walletId: mockWalletId,
+        userId: mockUserId,
+        amount: '100',
+        assetCode: 'XLM',
+        assetIssuer: null,
+        toAddress: mockDestination,
+      };
+      mockTransactionCreate.mockResolvedValue(mockTx);
+      mockTransactionCount.mockRejectedValue(new Error('database unavailable'));
+
+      const result = await PaymentService.createCrossBorderPayment(baseOptions, mockUserId);
+
+      expect(result.payment.id).toBe('tx-monitor-fail');
+      expect(mockTransactionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'tx-monitor-fail' },
+          data: expect.objectContaining({
+            isFlagged: true,
+            flaggedBy: 'monitoring',
+          }),
+        })
+      );
+      expect(mockAuditLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'payment_create_monitor_failed',
+            resourceId: 'tx-monitor-fail',
+            success: false,
           }),
         })
       );
@@ -648,7 +702,37 @@ describe('PaymentService', () => {
       expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
     });
 
-    it('should reject a blocked payment even when being reviewed', async () => {
+    it('should reject a flagged payment being reviewed', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: crossBorderMetadata,
+        isFlagged: true,
+        flagReviewAction: 'reviewing',
+        wallet: { secretKeyEncrypted: mockSecretEncrypted },
+      });
+
+      await expect(PaymentService.processPayment('tx-1', mockUserId)).rejects.toThrow(
+        'Payment is flagged for compliance review'
+      );
+      expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
+      expect(mockAuditLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'payment_process_blocked',
+            resourceId: 'tx-1',
+            success: false,
+            metadata: expect.objectContaining({
+              reason: 'flagged_for_compliance_review',
+              flagReviewAction: 'reviewing',
+            }),
+          }),
+        })
+      );
+    });
+
+    it('should reject a blocked payment', async () => {
       mockTransactionFindUnique.mockResolvedValue({
         id: 'tx-1',
         status: 'created',
@@ -663,6 +747,19 @@ describe('PaymentService', () => {
         'Payment is blocked by compliance review'
       );
       expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
+      expect(mockAuditLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            action: 'payment_process_blocked',
+            resourceId: 'tx-1',
+            success: false,
+            metadata: expect.objectContaining({
+              reason: 'blocked_by_compliance_review',
+              flagReviewAction: 'block',
+            }),
+          }),
+        })
+      );
     });
 
     it('should allow processing a released flagged payment', async () => {

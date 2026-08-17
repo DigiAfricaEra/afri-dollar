@@ -1,7 +1,12 @@
 export type MonitorSeverity = 'low' | 'medium' | 'high' | 'critical';
 
 export type MonitorRuleId =
-  'LARGE_TX' | 'VELOCITY_1H' | 'STRUCTURING' | 'HIGH_RISK_COUNTRY' | 'ROUND_AMOUNT';
+  | 'LARGE_TX'
+  | 'VELOCITY'
+  | 'STRUCTURING'
+  | 'HIGH_RISK_COUNTRY'
+  | 'ROUND_AMOUNT'
+  | 'UNPARSEABLE_AMOUNT';
 
 export type FlagReviewAction = 'reviewing' | 'release' | 'block';
 
@@ -32,6 +37,7 @@ export interface MonitorConfig {
 export interface ScreenTransactionsResult {
   scanned: number;
   flagged: number;
+  failed: number;
 }
 
 export interface FlaggedTransactionStats {

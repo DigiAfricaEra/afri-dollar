@@ -194,6 +194,7 @@ model Transaction {
   complianceAlerts ComplianceAlert[]
 
   @@index([userId])
+  @@index([userId, createdAt])
   @@index([walletId])
   @@index([status])
   @@index([stellarTxId])

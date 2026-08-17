@@ -571,20 +571,27 @@ export const AdminService = {
     }
 
     const updated = await prisma.$transaction(async (tx) => {
-      const reviewed = await tx.transaction.update({
-        where: { id },
+      const claimed = await tx.transaction.updateMany({
+        where: {
+          id,
+          isFlagged: true,
+          OR: [{ flagReviewAction: null }, { flagReviewAction: 'reviewing' }],
+        },
         data: {
           flagReviewAction: action,
-          resolvedBy: adminUserId,
-          resolvedAt: new Date(),
-          resolutionNote: options?.note,
-        },
-        include: {
-          user: {
-            select: { id: true, email: true, status: true },
-          },
+          ...(action === 'reviewing'
+            ? {}
+            : {
+                resolvedBy: adminUserId,
+                resolvedAt: new Date(),
+                resolutionNote: options?.note ?? null,
+              }),
         },
       });
+
+      if (claimed.count === 0) {
+        throw new AppError(409, 'Transaction review is already in progress or has been resolved');
+      }
 
       if (action !== 'reviewing') {
         await tx.complianceAlert.updateMany({
@@ -610,6 +617,19 @@ export const AdminService = {
           success: true,
         },
       });
+
+      const reviewed = await tx.transaction.findUnique({
+        where: { id },
+        include: {
+          user: {
+            select: { id: true, email: true, status: true },
+          },
+        },
+      });
+
+      if (!reviewed) {
+        throw new AppError(404, 'Transaction not found');
+      }
 
       return reviewed;
     });

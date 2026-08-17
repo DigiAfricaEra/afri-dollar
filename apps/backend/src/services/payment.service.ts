@@ -223,17 +223,46 @@ export const PaymentService = {
       },
     });
 
-    const monitorResult = await TransactionMonitorService.evaluate(transaction);
-    if (monitorResult.flagged) {
-      await TransactionMonitorService.applyFlags(transaction, monitorResult);
+    let monitorError: unknown;
+    try {
+      const monitorResult = await TransactionMonitorService.evaluate(transaction);
+      if (monitorResult.flagged) {
+        await TransactionMonitorService.applyFlags(transaction, monitorResult);
+      }
+    } catch (error) {
+      monitorError = error;
+      console.error('Transaction monitoring failed; flagging payment for manual review:', error);
+      try {
+        await prisma.transaction.update({
+          where: { id: transaction.id },
+          data: {
+            isFlagged: true,
+            flagReason: 'Monitoring error - payment requires manual review',
+            flaggedAt: new Date(),
+            flaggedBy: 'monitoring',
+          },
+        });
+      } catch (flagError) {
+        console.error('Failed to flag payment after monitoring error:', flagError);
+      }
     }
 
-    await logAudit(userId, 'payment_create', transaction.id, true, {
-      amount: options.amount,
-      assetCode: options.assetCode,
-      destinationAddress: options.destinationAddress,
-      purpose: options.purpose,
-    });
+    if (monitorError !== undefined) {
+      const monitorErrorMessage =
+        monitorError instanceof Error ? monitorError.message : JSON.stringify(monitorError);
+      await logAudit(userId, 'payment_create_monitor_failed', transaction.id, false, {
+        amount: options.amount,
+        assetCode: options.assetCode,
+        error: monitorErrorMessage,
+      });
+    } else {
+      await logAudit(userId, 'payment_create', transaction.id, true, {
+        amount: options.amount,
+        assetCode: options.assetCode,
+        destinationAddress: options.destinationAddress,
+        purpose: options.purpose,
+      });
+    }
 
     return {
       payment: mapToPaymentStatus(transaction),
@@ -269,8 +298,13 @@ export const PaymentService = {
     }
 
     if (transaction.isFlagged && transaction.flagReviewAction !== 'release') {
+      const blocked = transaction.flagReviewAction === 'block';
+      await logAudit(userId, 'payment_process_blocked', paymentId, false, {
+        reason: blocked ? 'blocked_by_compliance_review' : 'flagged_for_compliance_review',
+        flagReviewAction: transaction.flagReviewAction,
+      });
       throw new Error(
-        transaction.flagReviewAction === 'block'
+        blocked
           ? 'Payment is blocked by compliance review'
           : 'Payment is flagged for compliance review'
       );

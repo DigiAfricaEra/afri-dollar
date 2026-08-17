@@ -17,6 +17,7 @@ jest.mock('../../config/database', () => {
       findUnique: jest.fn(),
       count: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     complianceAlert: {
       findMany: jest.fn(),
@@ -93,6 +94,7 @@ const mockUserCount = prisma.user.count as jest.Mock;
 const mockUserUpdate = prisma.user.update as jest.Mock;
 const mockTransactionFindUnique = prisma.transaction.findUnique as jest.Mock;
 const mockTransactionUpdate = prisma.transaction.update as jest.Mock;
+const mockTransactionUpdateMany = prisma.transaction.updateMany as jest.Mock;
 const mockComplianceAlertCreate = prisma.complianceAlert.create as jest.Mock;
 const mockComplianceAlertFindUnique = prisma.complianceAlert.findUnique as jest.Mock;
 const mockComplianceAlertUpdate = prisma.complianceAlert.update as jest.Mock;
@@ -395,39 +397,41 @@ describe('AdminService', () => {
     });
   });
 
-  it('releases a flagged transaction, resolves open alerts and writes an audit log', async () => {
-    mockTransactionFindUnique.mockResolvedValue({
-      id: 'tx-1',
-      userId: 'user-1',
-      isFlagged: true,
-    });
-    mockTransactionUpdate.mockResolvedValue({
-      id: 'tx-1',
-      userId: 'user-1',
-      walletId: 'wallet-1',
-      type: 'transfer',
-      status: 'created',
-      amount: '15000',
-      assetCode: 'XLM',
-      assetIssuer: null,
-      fromAddress: null,
-      toAddress: null,
-      stellarTxId: null,
-      isFlagged: true,
-      flagReason: 'Amount 15000 exceeds the large transaction threshold of 10000',
-      flaggedAt: new Date('2026-08-17'),
-      flaggedBy: 'monitoring',
-      flagReviewAction: 'release',
-      resolvedBy: 'admin-1',
-      resolvedAt: new Date('2026-08-18'),
-      resolutionNote: 'Cleared after manual review',
-      metadata: null,
-      errorMessage: null,
-      createdAt: new Date('2026-08-17'),
-      updatedAt: new Date('2026-08-18'),
-      completedAt: null,
-      user: { id: 'user-1', email: 'a@example.com', status: 'active' },
-    });
+  it('releases a flagged transaction and resolves open alerts', async () => {
+    mockTransactionFindUnique
+      .mockResolvedValueOnce({
+        id: 'tx-1',
+        userId: 'user-1',
+        isFlagged: true,
+      })
+      .mockResolvedValueOnce({
+        id: 'tx-1',
+        userId: 'user-1',
+        walletId: 'wallet-1',
+        type: 'transfer',
+        status: 'created',
+        amount: '15000',
+        assetCode: 'XLM',
+        assetIssuer: null,
+        fromAddress: null,
+        toAddress: null,
+        stellarTxId: null,
+        isFlagged: true,
+        flagReason: 'Amount 15000 exceeds the large transaction threshold of 10000',
+        flaggedAt: new Date('2026-08-17'),
+        flaggedBy: 'monitoring',
+        flagReviewAction: 'release',
+        resolvedBy: 'admin-1',
+        resolvedAt: new Date('2026-08-18'),
+        resolutionNote: 'Cleared after manual review',
+        metadata: null,
+        errorMessage: null,
+        createdAt: new Date('2026-08-17'),
+        updatedAt: new Date('2026-08-18'),
+        completedAt: null,
+        user: { id: 'user-1', email: 'a@example.com', status: 'active' },
+      });
+    mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
     mockComplianceAlertUpdateMany.mockResolvedValue({ count: 1 });
     mockAuditLogCreate.mockResolvedValue({});
 
@@ -437,6 +441,20 @@ describe('AdminService', () => {
 
     expect(result.flagReviewAction).toBe('release');
     expect(result.resolvedBy).toBe('admin-1');
+    expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: 'tx-1',
+          isFlagged: true,
+          OR: [{ flagReviewAction: null }, { flagReviewAction: 'reviewing' }],
+        },
+        data: expect.objectContaining({
+          flagReviewAction: 'release',
+          resolvedBy: 'admin-1',
+          resolutionNote: 'Cleared after manual review',
+        }),
+      })
+    );
     expect(mockComplianceAlertUpdateMany).toHaveBeenCalledWith({
       where: { transactionId: 'tx-1', status: 'open' },
       data: expect.objectContaining({ status: 'resolved' }),
@@ -451,17 +469,19 @@ describe('AdminService', () => {
   });
 
   it('blocks a flagged transaction and dismisses open alerts', async () => {
-    mockTransactionFindUnique.mockResolvedValue({
-      id: 'tx-1',
-      userId: 'user-1',
-      isFlagged: true,
-    });
-    mockTransactionUpdate.mockResolvedValue({
-      id: 'tx-1',
-      flagReviewAction: 'block',
-      resolvedBy: 'admin-1',
-      user: null,
-    });
+    mockTransactionFindUnique
+      .mockResolvedValueOnce({
+        id: 'tx-1',
+        userId: 'user-1',
+        isFlagged: true,
+      })
+      .mockResolvedValueOnce({
+        id: 'tx-1',
+        flagReviewAction: 'block',
+        resolvedBy: 'admin-1',
+        user: null,
+      });
+    mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
     mockComplianceAlertUpdateMany.mockResolvedValue({ count: 1 });
     mockAuditLogCreate.mockResolvedValue({});
 
@@ -470,29 +490,72 @@ describe('AdminService', () => {
     });
 
     expect(result.flagReviewAction).toBe('block');
+    expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: 'tx-1',
+          isFlagged: true,
+          OR: [{ flagReviewAction: null }, { flagReviewAction: 'reviewing' }],
+        },
+        data: expect.objectContaining({
+          flagReviewAction: 'block',
+          resolvedBy: 'admin-1',
+          resolutionNote: 'Blocked permanently',
+        }),
+      })
+    );
     expect(mockComplianceAlertUpdateMany).toHaveBeenCalledWith({
       where: { transactionId: 'tx-1', status: 'open' },
       data: expect.objectContaining({ status: 'dismissed' }),
     });
   });
 
-  it('keeps open alerts unresolved when marking a transaction as reviewing', async () => {
-    mockTransactionFindUnique.mockResolvedValue({
-      id: 'tx-1',
-      userId: 'user-1',
-      isFlagged: true,
-    });
-    mockTransactionUpdate.mockResolvedValue({
-      id: 'tx-1',
-      flagReviewAction: 'reviewing',
-      user: null,
-    });
+  it('keeps open alerts unresolved and clears resolution fields when marking a transaction as reviewing', async () => {
+    mockTransactionFindUnique
+      .mockResolvedValueOnce({
+        id: 'tx-1',
+        userId: 'user-1',
+        isFlagged: true,
+      })
+      .mockResolvedValueOnce({
+        id: 'tx-1',
+        flagReviewAction: 'reviewing',
+        user: null,
+      });
+    mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
     mockAuditLogCreate.mockResolvedValue({});
 
     const result = await AdminService.reviewFlaggedTransaction('tx-1', 'reviewing', 'admin-1');
 
     expect(result.flagReviewAction).toBe('reviewing');
+    expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ flagReviewAction: 'reviewing' }),
+      })
+    );
+    const call = mockTransactionUpdateMany.mock.calls[0][0] as { data: Record<string, unknown> };
+    expect(call.data.resolvedBy).toBeUndefined();
+    expect(call.data.resolvedAt).toBeUndefined();
+    expect(call.data.resolutionNote).toBeUndefined();
     expect(mockComplianceAlertUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it('rejects the review with a conflict when another admin already resolved it', async () => {
+    mockTransactionFindUnique.mockResolvedValue({
+      id: 'tx-1',
+      userId: 'user-1',
+      isFlagged: true,
+    });
+    mockTransactionUpdateMany.mockResolvedValue({ count: 0 });
+
+    const error = await AdminService.reviewFlaggedTransaction('tx-1', 'release', 'admin-1').catch(
+      (caught: unknown) => caught
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as AppError).status).toBe(409);
+    expect(mockComplianceAlertUpdateMany).not.toHaveBeenCalled();
+    expect(mockAuditLogCreate).not.toHaveBeenCalled();
   });
 
   it('rejects reviewing a transaction that is not flagged', async () => {

@@ -1,6 +1,9 @@
 /* eslint-disable @typescript-eslint/unbound-method */
 import prisma from '../../config/database';
-import { TransactionMonitorService } from '../../services/transaction-monitor.service';
+import {
+  TransactionMonitorService,
+  resetConfigCacheForTests,
+} from '../../services/transaction-monitor.service';
 
 jest.mock('../../config/database', () => {
   const client: Record<string, unknown> = {
@@ -10,7 +13,7 @@ jest.mock('../../config/database', () => {
     transaction: {
       count: jest.fn(),
       findMany: jest.fn(),
-      update: jest.fn(),
+      updateMany: jest.fn(),
     },
     complianceAlert: {
       create: jest.fn(),
@@ -34,7 +37,7 @@ jest.mock('../../config/database', () => {
 const mockSystemConfigFindMany = prisma.systemConfig.findMany as jest.Mock;
 const mockTransactionCount = prisma.transaction.count as jest.Mock;
 const mockTransactionFindMany = prisma.transaction.findMany as jest.Mock;
-const mockTransactionUpdate = prisma.transaction.update as jest.Mock;
+const mockTransactionUpdateMany = prisma.transaction.updateMany as jest.Mock;
 const mockComplianceAlertCreate = prisma.complianceAlert.create as jest.Mock;
 
 const baseTransaction = {
@@ -42,15 +45,18 @@ const baseTransaction = {
   userId: 'user-1',
   amount: '100',
   assetCode: 'XLM',
+  createdAt: new Date(),
   metadata: {},
 };
 
 describe('TransactionMonitorService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    resetConfigCacheForTests();
     mockSystemConfigFindMany.mockResolvedValue([]);
     mockTransactionCount.mockResolvedValue(0);
-    mockTransactionUpdate.mockResolvedValue({});
+    mockTransactionFindMany.mockResolvedValue([]);
+    mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
     mockComplianceAlertCreate.mockResolvedValue({});
   });
 
@@ -105,7 +111,7 @@ describe('TransactionMonitorService', () => {
       expect(result.alerts).toHaveLength(0);
     });
 
-    it('flags high velocity within the window as medium severity VELOCITY_1H', async () => {
+    it('flags high velocity within the window as medium severity VELOCITY', async () => {
       mockTransactionCount.mockResolvedValue(11);
 
       const result = await TransactionMonitorService.evaluate(baseTransaction);
@@ -113,7 +119,7 @@ describe('TransactionMonitorService', () => {
       expect(result.flagged).toBe(true);
       expect(result.alerts).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ ruleId: 'VELOCITY_1H', severity: 'medium' }),
+          expect.objectContaining({ ruleId: 'VELOCITY', severity: 'medium' }),
         ])
       );
     });
@@ -177,6 +183,95 @@ describe('TransactionMonitorService', () => {
         expect.arrayContaining([expect.objectContaining({ ruleId: 'LARGE_TX' })])
       );
     });
+
+    it('flags structuring at create time when the user has three transactions in the band', async () => {
+      const now = baseTransaction.createdAt;
+      const earlier = [
+        { id: 'tx-prev-1', amount: '9500', createdAt: new Date(now.getTime() - 30 * 60_000) },
+        { id: 'tx-prev-2', amount: '9500', createdAt: new Date(now.getTime() - 15 * 60_000) },
+      ];
+      const current = { ...baseTransaction, amount: '9500' };
+      mockTransactionFindMany.mockResolvedValue([...earlier, current]);
+
+      const result = await TransactionMonitorService.evaluate(current);
+
+      expect(result.flagged).toBe(true);
+      expect(result.alerts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            ruleId: 'STRUCTURING',
+            severity: 'medium',
+            message: expect.stringContaining('3 transactions'),
+          }),
+        ])
+      );
+    });
+
+    it('does not flag structuring when fewer than three transactions are in the band', async () => {
+      const now = baseTransaction.createdAt;
+      const current = { ...baseTransaction, amount: '9500' };
+      mockTransactionFindMany.mockResolvedValue([
+        { id: 'tx-prev-1', amount: '9500', createdAt: new Date(now.getTime() - 30 * 60_000) },
+        current,
+      ]);
+
+      const result = await TransactionMonitorService.evaluate(current);
+
+      expect(result.flagged).toBe(false);
+      expect(result.alerts).toHaveLength(0);
+    });
+
+    it('flags an unparseable amount as high severity UNPARSEABLE_AMOUNT', async () => {
+      const result = await TransactionMonitorService.evaluate({
+        ...baseTransaction,
+        amount: 'not-a-number',
+      });
+
+      expect(result.flagged).toBe(true);
+      expect(result.alerts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ ruleId: 'UNPARSEABLE_AMOUNT', severity: 'high' }),
+        ])
+      );
+    });
+
+    it('flags an empty amount as high severity UNPARSEABLE_AMOUNT', async () => {
+      const result = await TransactionMonitorService.evaluate({
+        ...baseTransaction,
+        amount: '',
+      });
+
+      expect(result.flagged).toBe(true);
+      expect(result.alerts).toEqual(
+        expect.arrayContaining([expect.objectContaining({ ruleId: 'UNPARSEABLE_AMOUNT' })])
+      );
+    });
+  });
+
+  describe('getMonitorConfig', () => {
+    it('falls back to defaults when the config query fails', async () => {
+      mockSystemConfigFindMany.mockRejectedValue(new Error('database unavailable'));
+
+      const config = await TransactionMonitorService.getMonitorConfig();
+
+      expect(config.largeTxThresholdUsd).toBe(10000);
+      expect(config.velocityWindowMinutes).toBe(60);
+      expect(config.structuringRatio).toBe(0.8);
+    });
+
+    it('clamps out-of-range configured values to defaults', async () => {
+      mockSystemConfigFindMany.mockResolvedValue([
+        { key: 'monitor.velocityWindowMinutes', value: -5 },
+        { key: 'monitor.structuringRatio', value: 2 },
+        { key: 'monitor.roundAmountModulus', value: 0 },
+      ]);
+
+      const config = await TransactionMonitorService.getMonitorConfig();
+
+      expect(config.velocityWindowMinutes).toBe(60);
+      expect(config.structuringRatio).toBe(0.8);
+      expect(config.roundAmountModulus).toBe(1000);
+    });
   });
 
   describe('applyFlags', () => {
@@ -188,9 +283,9 @@ describe('TransactionMonitorService', () => {
 
       await TransactionMonitorService.applyFlags(baseTransaction, result);
 
-      expect(mockTransactionUpdate).toHaveBeenCalledWith(
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'tx-1' },
+          where: { id: 'tx-1', isFlagged: false },
           data: expect.objectContaining({
             isFlagged: true,
             flaggedBy: 'monitoring',
@@ -218,7 +313,19 @@ describe('TransactionMonitorService', () => {
 
       await TransactionMonitorService.applyFlags(baseTransaction, result);
 
-      expect(mockTransactionUpdate).not.toHaveBeenCalled();
+      expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
+      expect(mockComplianceAlertCreate).not.toHaveBeenCalled();
+    });
+
+    it('does not create an alert when the transaction was already claimed by another process', async () => {
+      mockTransactionUpdateMany.mockResolvedValue({ count: 0 });
+      const result = await TransactionMonitorService.evaluate({
+        ...baseTransaction,
+        amount: '15000',
+      });
+
+      await TransactionMonitorService.applyFlags(baseTransaction, result);
+
       expect(mockComplianceAlertCreate).not.toHaveBeenCalled();
     });
   });
@@ -233,23 +340,35 @@ describe('TransactionMonitorService', () => {
       createdAt,
     });
 
+    function mockScreeningCalls(rows: Array<{ id: string; amount: string; createdAt: Date }>) {
+      mockTransactionFindMany.mockImplementation(
+        (args: { where?: Record<string, unknown>; cursor?: { id: string } }) => {
+          if (args?.where?.isFlagged === false) {
+            if (args?.cursor) {
+              return Promise.resolve([]);
+            }
+            return Promise.resolve(rows);
+          }
+          if (args?.where?.userId) {
+            return Promise.resolve(rows);
+          }
+          return Promise.resolve([]);
+        }
+      );
+    }
+
     it('flags the third structuring transaction of a user', async () => {
       const now = new Date();
       const first = windowTransaction('tx-1', '9500', new Date(now.getTime() - 30 * 60_000));
       const second = windowTransaction('tx-2', '9500', new Date(now.getTime() - 15 * 60_000));
       const third = windowTransaction('tx-3', '9500', new Date(now.getTime() - 5 * 60_000));
-
-      mockTransactionFindMany
-        .mockResolvedValueOnce([first, second, third])
-        .mockResolvedValueOnce([first, second, third])
-        .mockResolvedValueOnce([first, second, third])
-        .mockResolvedValueOnce([first, second, third])
-        .mockResolvedValue([]);
+      mockScreeningCalls([first, second, third]);
 
       const result = await TransactionMonitorService.screenPastTransactions();
 
       expect(result.scanned).toBe(3);
       expect(result.flagged).toBe(1);
+      expect(result.failed).toBe(0);
       expect(mockComplianceAlertCreate).toHaveBeenCalledTimes(1);
       expect(mockComplianceAlertCreate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -266,12 +385,7 @@ describe('TransactionMonitorService', () => {
       const now = new Date();
       const first = windowTransaction('tx-1', '9500', new Date(now.getTime() - 30 * 60_000));
       const second = windowTransaction('tx-2', '9500', new Date(now.getTime() - 15 * 60_000));
-
-      mockTransactionFindMany
-        .mockResolvedValueOnce([first, second])
-        .mockResolvedValueOnce([first, second])
-        .mockResolvedValueOnce([first, second])
-        .mockResolvedValue([]);
+      mockScreeningCalls([first, second]);
 
       const result = await TransactionMonitorService.screenPastTransactions();
 
@@ -287,18 +401,44 @@ describe('TransactionMonitorService', () => {
         windowTransaction('tx-2', '15000', new Date(now.getTime() - 15 * 60_000)),
         windowTransaction('tx-3', '15000', new Date(now.getTime() - 5 * 60_000)),
       ];
-
-      mockTransactionFindMany
-        .mockResolvedValueOnce(rows)
-        .mockResolvedValueOnce(rows)
-        .mockResolvedValueOnce(rows)
-        .mockResolvedValueOnce(rows)
-        .mockResolvedValue([]);
+      mockScreeningCalls(rows);
 
       const result = await TransactionMonitorService.screenPastTransactions();
 
       expect(result.flagged).toBe(0);
       expect(mockComplianceAlertCreate).not.toHaveBeenCalled();
+    });
+
+    it('continues screening after a per-row failure and reports the failure count', async () => {
+      const now = new Date();
+      const first = windowTransaction('tx-1', '9500', new Date(now.getTime() - 30 * 60_000));
+      const second = windowTransaction('tx-2', '9500', new Date(now.getTime() - 15 * 60_000));
+      let windowQueryCount = 0;
+
+      mockTransactionFindMany.mockImplementation(
+        (args: { where?: Record<string, unknown>; cursor?: { id: string } }) => {
+          if (args?.where?.isFlagged === false) {
+            if (args?.cursor) {
+              return Promise.resolve([]);
+            }
+            return Promise.resolve([first, second]);
+          }
+          if (args?.where?.userId) {
+            windowQueryCount += 1;
+            if (windowQueryCount === 1) {
+              return Promise.reject(new Error('database unavailable'));
+            }
+            return Promise.resolve([first, second]);
+          }
+          return Promise.resolve([]);
+        }
+      );
+
+      const result = await TransactionMonitorService.screenPastTransactions();
+
+      expect(result.scanned).toBe(2);
+      expect(result.flagged).toBe(0);
+      expect(result.failed).toBe(1);
     });
   });
 });
