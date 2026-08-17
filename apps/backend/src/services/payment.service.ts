@@ -83,6 +83,10 @@ async function logAudit(
   }
 }
 
+/**
+ * Rejects processing when the payment is flagged and not released, auditing
+ * the compliance block before throwing.
+ */
 async function assertPaymentNotComplianceBlocked(
   userId: string,
   paymentId: string,
@@ -154,6 +158,11 @@ async function performComplianceChecks(
 }
 
 export const PaymentService = {
+  /**
+   * Creates a cross-border payment, running AML screening and transaction
+   * monitoring, and flagging the payment for manual review when monitoring
+   * fails.
+   */
   async createCrossBorderPayment(
     options: CreateCrossBorderPaymentOptions,
     userId: string
@@ -297,6 +306,10 @@ export const PaymentService = {
     };
   },
 
+  /**
+   * Processes a created cross-border payment, enforcing the compliance
+   * review gate before claiming the payment for processing.
+   */
   async processPayment(paymentId: string, userId: string): Promise<PaymentStatus> {
     const transaction = await prisma.transaction.findUnique({
       where: { id: paymentId },

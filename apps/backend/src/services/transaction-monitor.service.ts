@@ -79,6 +79,10 @@ const DEFAULT_CONFIG: MonitorConfig = {
 const SCREEN_PAGE_SIZE = 100;
 const CONFIG_CACHE_TTL_MS = 60_000;
 
+/**
+ * Parses a string amount into a finite number, returning null for empty or
+ * unparseable values.
+ */
 function parseAmount(amount: string | null | undefined): number | null {
   if (amount === null || amount === undefined || amount.trim() === '') {
     return null;
@@ -87,6 +91,10 @@ function parseAmount(amount: string | null | undefined): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+/**
+ * Reads a numeric config value within [min, max], falling back to the
+ * supplied default when the value is invalid or out of range.
+ */
 function readNumber(
   value: unknown,
   fallback: number,
@@ -103,6 +111,9 @@ function readNumber(
   return parsed;
 }
 
+/**
+ * Extracts the normalized destination country code from transaction metadata.
+ */
 function getBeneficiaryCountry(metadata: unknown): string | null {
   if (!metadata || typeof metadata !== 'object') {
     return null;
@@ -119,10 +130,17 @@ function getBeneficiaryCountry(metadata: unknown): string | null {
 
 let cachedConfig: { config: MonitorConfig; expiresAt: number } | null = null;
 
+/**
+ * Clears the cached monitoring config so tests start from a fresh state.
+ */
 export function resetConfigCacheForTests(): void {
   cachedConfig = null;
 }
 
+/**
+ * Loads the monitor.* SystemConfig entries with a short TTL cache, falling
+ * back to DEFAULT_CONFIG when the database is unreachable.
+ */
 async function getMonitorConfig(): Promise<MonitorConfig> {
   const now = Date.now();
   if (cachedConfig && cachedConfig.expiresAt > now) {
@@ -204,6 +222,9 @@ async function getMonitorConfig(): Promise<MonitorConfig> {
   }
 }
 
+/**
+ * Counts transactions created by the user within the given window.
+ */
 const countRecentTransactions = (userId: string, windowMinutes: number): Promise<number> =>
   prisma.transaction.count({
     where: {
@@ -212,6 +233,11 @@ const countRecentTransactions = (userId: string, windowMinutes: number): Promise
     },
   });
 
+/**
+ * Filters window rows to the structuring band: amounts above the large
+ * transaction threshold times the structuring ratio and at or below the
+ * threshold, ordered by creation time and id for a stable tie-break.
+ */
 function filterStructuringCandidates(
   windowRows: StructuringCandidate[],
   transaction: { id: string; createdAt: Date },
@@ -234,6 +260,10 @@ function filterStructuringCandidates(
   });
 }
 
+/**
+ * Appends a VELOCITY alert when the user exceeds the configured velocity
+ * limit within the configured window.
+ */
 async function applyVelocityRule(
   alerts: MonitorRuleResult[],
   transaction: MonitorableTransaction,
@@ -252,6 +282,10 @@ async function applyVelocityRule(
   }
 }
 
+/**
+ * Loads the user's transactions within the window and filters them into
+ * structuring candidates.
+ */
 async function collectStructuringCandidates(
   transaction: MonitorableTransaction,
   since: Date,
@@ -269,6 +303,11 @@ async function collectStructuringCandidates(
   return filterStructuringCandidates(windowRows, transaction, config);
 }
 
+/**
+ * Conditionally flags an unclaimed transaction and records a compliance
+ * alert on a successful claim. Returns true when this call performed the
+ * flagging, so concurrent scans cannot create duplicate alerts.
+ */
 async function claimFlag(
   client: Prisma.TransactionClient,
   transaction: { id: string; userId: string },
@@ -308,6 +347,10 @@ async function claimFlag(
   return true;
 }
 
+/**
+ * Runs every monitoring rule against a single transaction and returns the
+ * collected alerts, evaluating structuring patterns at creation time.
+ */
 async function evaluateTransaction(
   transaction: MonitorableTransaction
 ): Promise<TransactionMonitorResult> {
@@ -365,6 +408,10 @@ async function evaluateTransaction(
   return { flagged: alerts.length > 0, alerts };
 }
 
+/**
+ * Screens one transaction row against the structuring band, flagging it via
+ * a conditional claim when the threshold is met.
+ */
 async function screenRow(
   row: { id: string; userId: string; createdAt: Date },
   since: Date,
@@ -408,6 +455,11 @@ async function screenRow(
   return claimed ? 'flagged' : 'not-flagged';
 }
 
+/**
+ * Paginates the un-flagged transaction window and screens each row,
+ * isolating per-row failures and returning scanned, flagged, and failed
+ * counts.
+ */
 async function screenWindow(config: MonitorConfig, since: Date): Promise<ScreenTransactionsResult> {
   let scanned = 0;
   let flagged = 0;
@@ -460,6 +512,10 @@ export const TransactionMonitorService = {
 
   evaluate: evaluateTransaction,
 
+  /**
+   * Persists the highest-severity alert of a flagged transaction via a
+   * conditional claim.
+   */
   async applyFlags(
     transaction: MonitorableTransaction,
     result: TransactionMonitorResult
@@ -485,6 +541,9 @@ export const TransactionMonitorService = {
     );
   },
 
+  /**
+   * Screens recent un-flagged transactions for structuring patterns.
+   */
   async screenPastTransactions(): Promise<ScreenTransactionsResult> {
     const config = await getMonitorConfig();
     const since = new Date(Date.now() - config.structuringWindowHours * 3_600_000);

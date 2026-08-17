@@ -279,6 +279,11 @@ async function writeAdminAudit(params: {
   });
 }
 
+/**
+ * Applies an admin review action to a flagged transaction inside a
+ * transaction, rejecting concurrent or already-resolved reviews and keeping
+ * the alert and audit state consistent with the final review outcome.
+ */
 async function performReviewTransition(
   tx: Prisma.TransactionClient,
   params: {
@@ -629,6 +634,10 @@ export const AdminService = {
     };
   },
 
+  /**
+   * Reviews a flagged transaction with a release, block, or reviewing action,
+   * enforcing permitted state transitions atomically.
+   */
   async reviewFlaggedTransaction(
     id: string,
     action: FlagReviewAction,
