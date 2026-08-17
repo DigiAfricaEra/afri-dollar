@@ -76,6 +76,10 @@ export interface AdminTransaction {
   flagReason?: string | null;
   flaggedAt?: Date | null;
   flaggedBy?: string | null;
+  flagReviewAction?: string | null;
+  resolvedBy?: string | null;
+  resolvedAt?: Date | null;
+  resolutionNote?: string | null;
   metadata?: unknown;
   errorMessage?: string | null;
   createdAt: Date;

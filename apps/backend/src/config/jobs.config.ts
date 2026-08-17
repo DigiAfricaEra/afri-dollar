@@ -41,4 +41,12 @@ export const jobs: JobDefinition[] = [
     retryAttempts: 3,
     retryDelay: 60000,
   },
+  {
+    name: 'screen-transactions',
+    schedule: '0 2 * * *',
+    handler: 'screenTransactions',
+    priority: 'low',
+    retryAttempts: 2,
+    retryDelay: 300000,
+  },
 ];

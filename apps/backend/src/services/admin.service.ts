@@ -13,6 +13,7 @@ import type {
   SystemConfigEntry,
   SystemHealth,
 } from '../types/admin.types';
+import type { FlagReviewAction, FlaggedTransactionStats } from '../types/transaction-monitor.types';
 
 import { AuditService } from './audit.service';
 import { jobQueueService } from './job-queue.service';
@@ -118,6 +119,10 @@ function mapTransaction(tx: {
   flagReason: string | null;
   flaggedAt: Date | null;
   flaggedBy: string | null;
+  flagReviewAction: string | null;
+  resolvedBy: string | null;
+  resolvedAt: Date | null;
+  resolutionNote: string | null;
   metadata: Prisma.JsonValue | null;
   errorMessage: string | null;
   createdAt: Date;
@@ -145,6 +150,10 @@ function mapTransaction(tx: {
     flagReason: tx.flagReason,
     flaggedAt: tx.flaggedAt,
     flaggedBy: tx.flaggedBy,
+    flagReviewAction: tx.flagReviewAction,
+    resolvedBy: tx.resolvedBy,
+    resolvedAt: tx.resolvedAt,
+    resolutionNote: tx.resolutionNote,
     metadata: tx.metadata,
     errorMessage: tx.errorMessage,
     createdAt: tx.createdAt,
@@ -488,6 +497,124 @@ export const AdminService = {
       page,
       limit,
     });
+  },
+
+  async listFlaggedTransactions(
+    page: number,
+    limit: number
+  ): Promise<{ data: AdminTransaction[]; pagination: PaginationResult }> {
+    return this.listTransactions({
+      isFlagged: true,
+      page,
+      limit,
+    });
+  },
+
+  async getFlaggedTransactionStats(): Promise<FlaggedTransactionStats> {
+    const [total, pendingReview, reviewing, released, blocked, severityGroups, ruleGroups] =
+      await Promise.all([
+        prisma.transaction.count({ where: { isFlagged: true } }),
+        prisma.transaction.count({ where: { isFlagged: true, flagReviewAction: null } }),
+        prisma.transaction.count({ where: { isFlagged: true, flagReviewAction: 'reviewing' } }),
+        prisma.transaction.count({ where: { isFlagged: true, flagReviewAction: 'release' } }),
+        prisma.transaction.count({ where: { isFlagged: true, flagReviewAction: 'block' } }),
+        prisma.complianceAlert.groupBy({
+          by: ['severity'],
+          where: { transactionId: { not: null }, status: 'open' },
+          _count: { severity: true },
+        }),
+        prisma.complianceAlert.groupBy({
+          by: ['ruleId'],
+          where: { transactionId: { not: null }, status: 'open', ruleId: { not: null } },
+          _count: { ruleId: true },
+        }),
+      ]);
+
+    const bySeverity: Record<string, number> = {};
+    for (const group of severityGroups) {
+      bySeverity[group.severity] = group._count.severity;
+    }
+
+    const byRule: Record<string, number> = {};
+    for (const group of ruleGroups) {
+      byRule[group.ruleId as string] = group._count.ruleId;
+    }
+
+    return {
+      total,
+      pendingReview,
+      reviewing,
+      released,
+      blocked,
+      bySeverity,
+      byRule,
+    };
+  },
+
+  async reviewFlaggedTransaction(
+    id: string,
+    action: FlagReviewAction,
+    adminUserId: string,
+    options?: {
+      note?: string;
+      ipAddress?: string;
+      userAgent?: string;
+    }
+  ): Promise<AdminTransaction> {
+    const existing = await prisma.transaction.findUnique({ where: { id } });
+    if (!existing) {
+      throw new AppError(404, 'Transaction not found');
+    }
+
+    if (!existing.isFlagged) {
+      throw new AppError(400, 'Transaction is not flagged');
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const reviewed = await tx.transaction.update({
+        where: { id },
+        data: {
+          flagReviewAction: action,
+          resolvedBy: adminUserId,
+          resolvedAt: new Date(),
+          resolutionNote: options?.note,
+        },
+        include: {
+          user: {
+            select: { id: true, email: true, status: true },
+          },
+        },
+      });
+
+      if (action !== 'reviewing') {
+        await tx.complianceAlert.updateMany({
+          where: { transactionId: id, status: 'open' },
+          data: {
+            status: action === 'release' ? 'resolved' : 'dismissed',
+            resolvedAt: new Date(),
+            resolvedBy: adminUserId,
+            resolutionNote: options?.note,
+          },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: adminUserId,
+          action: 'tx.flag_review',
+          resource: 'transaction',
+          resourceId: id,
+          metadata: { action, note: options?.note },
+          ipAddress: options?.ipAddress,
+          userAgent: options?.userAgent,
+          success: true,
+        },
+      });
+
+      return reviewed;
+    });
+
+    return mapTransaction(updated);
   },
 
   async flagTransaction(

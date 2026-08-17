@@ -19,6 +19,7 @@ import type {
 import { decrypt } from '../utils/crypto';
 
 import { StellarService } from './stellar.service';
+import { TransactionMonitorService } from './transaction-monitor.service';
 import { WebhookService } from './webhook.service';
 
 const server = StellarService.getHorizonServer();
@@ -222,6 +223,11 @@ export const PaymentService = {
       },
     });
 
+    const monitorResult = await TransactionMonitorService.evaluate(transaction);
+    if (monitorResult.flagged) {
+      await TransactionMonitorService.applyFlags(transaction, monitorResult);
+    }
+
     await logAudit(userId, 'payment_create', transaction.id, true, {
       amount: options.amount,
       assetCode: options.assetCode,
@@ -260,6 +266,14 @@ export const PaymentService = {
 
     if (transaction.status !== 'created') {
       throw new Error('Only created payments can be processed');
+    }
+
+    if (transaction.isFlagged && transaction.flagReviewAction !== 'release') {
+      throw new Error(
+        transaction.flagReviewAction === 'block'
+          ? 'Payment is blocked by compliance review'
+          : 'Payment is flagged for compliance review'
+      );
     }
 
     const updateCount = await prisma.transaction.updateMany({
