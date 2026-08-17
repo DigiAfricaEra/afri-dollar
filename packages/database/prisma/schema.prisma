@@ -369,6 +369,9 @@ model ReportRequest {
   parameters      Json?
   status          ReportStatus  @default(pending)
   downloadUrl     String?
+  storageKey      String?
+  fileSizeBytes   Int?
+  mimeType        String?
   createdAt       DateTime      @default(now())
   completedAt     DateTime?
 

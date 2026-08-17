@@ -1,28 +1,132 @@
 import fs from 'fs';
 import path from 'path';
 
-import { Decimal } from '@prisma/client/runtime/library';
-import { createObjectCsvWriter } from 'csv-writer';
-import { Workbook } from 'exceljs';
-import PDFDocument from 'pdfkit';
-
 import prisma from '../config/database';
 import { AppError } from '../types';
 import type { ReportType, ReportFormat, ReportParameters, ReportData } from '../types';
 
-const REPORTS_DIR = path.resolve(__dirname, '../../uploads/reports');
+export const REPORT_STORAGE_DIR =
+  process.env.REPORT_STORAGE_DIR || path.resolve(__dirname, '../../uploads/reports');
 
-if (!fs.existsSync(REPORTS_DIR)) {
-  fs.mkdirSync(REPORTS_DIR, { recursive: true });
+if (!fs.existsSync(REPORT_STORAGE_DIR)) {
+  fs.mkdirSync(REPORT_STORAGE_DIR, { recursive: true });
 }
 
 export const REPORT_FETCH_LIMIT = 10_000;
 
+export interface StorageAdapter {
+  writeStream(key: string): fs.WriteStream;
+  getReadStream(key: string): fs.ReadStream;
+  exists(key: string): Promise<boolean>;
+  delete(key: string): Promise<void>;
+  getUrl(key: string): string;
+}
+
+export class LocalStorageAdapter implements StorageAdapter {
+  private baseDir: string;
+
+  constructor(baseDir?: string) {
+    this.baseDir = baseDir || REPORT_STORAGE_DIR;
+    if (!fs.existsSync(this.baseDir)) {
+      fs.mkdirSync(this.baseDir, { recursive: true });
+    }
+  }
+
+  private getFullPath(key: string): string {
+    const safeKey = key.startsWith('/') ? key.substring(1) : key;
+    const fullPath = path.join(this.baseDir, safeKey);
+    const dir = path.dirname(fullPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return fullPath;
+  }
+
+  writeStream(key: string): fs.WriteStream {
+    return fs.createWriteStream(this.getFullPath(key));
+  }
+
+  getReadStream(key: string): fs.ReadStream {
+    return fs.createReadStream(this.getFullPath(key));
+  }
+
+  async exists(key: string): Promise<boolean> {
+    return fs.existsSync(this.getFullPath(key));
+  }
+
+  async delete(key: string): Promise<void> {
+    const fullPath = this.getFullPath(key);
+    if (fs.existsSync(fullPath)) {
+      await fs.promises.unlink(fullPath);
+    }
+  }
+
+  getUrl(key: string): string {
+    return `/uploads/${key}`;
+  }
+}
+
+export class S3StorageAdapter implements StorageAdapter {
+  writeStream(_key: string): fs.WriteStream {
+    throw new Error('S3StorageAdapter writeStream not implemented yet');
+  }
+  getReadStream(_key: string): fs.ReadStream {
+    throw new Error('S3StorageAdapter getReadStream not implemented yet');
+  }
+  async exists(_key: string): Promise<boolean> {
+    return false;
+  }
+  async delete(_key: string): Promise<void> {}
+  getUrl(key: string): string {
+    return `https://s3.amazonaws.com/my-bucket/${key}`;
+  }
+}
+
+export function getStorageAdapter(): StorageAdapter {
+  if (process.env.STORAGE_PROVIDER === 's3') {
+    return new S3StorageAdapter();
+  }
+  return new LocalStorageAdapter();
+}
+
+export function getMimeType(format: ReportFormat | string): string {
+  const types: Record<string, string> = {
+    csv: 'text/csv',
+    pdf: 'application/pdf',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  };
+  return types[format] || 'application/octet-stream';
+}
+
+export function buildQueryParams(params?: ReportParameters): Record<string, unknown> {
+  if (!params) return {};
+  const query: Record<string, unknown> = {};
+  if (params.startDate) query.startDate = params.startDate;
+  if (params.endDate) query.endDate = params.endDate;
+  if (params.assetCode) query.assetCode = params.assetCode;
+  if (params.status) query.status = params.status;
+  if (params.userId) query.userId = params.userId;
+  return query;
+}
+
+export function resolveFilename(
+  reportType: ReportType | string,
+  format: ReportFormat | string
+): string {
+  const cleanType = String(reportType).replace(/-/g, '_');
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[-:T.]/g, '')
+    .substring(0, 14);
+  return `${cleanType}_${timestamp}.${format}`;
+}
+
 export function getFilePath(requestId: string, format: ReportFormat): string {
-  return path.join(REPORTS_DIR, `${requestId}.${format}`);
+  return path.join(REPORT_STORAGE_DIR, `${requestId}.${format}`);
 }
 
 export function validateReportType(value: string): ReportType {
+  const normalize = (s: string) => s.replace(/_/g, '-');
   const valid: ReportType[] = [
     'transaction-history',
     'compliance-report',
@@ -32,8 +136,9 @@ export function validateReportType(value: string): ReportType {
     'audit-log',
   ];
 
+  const normalized = normalize(value);
   for (const v of valid) {
-    if (value === v) return v;
+    if (normalized === v) return v;
   }
 
   throw new AppError(400, `Invalid report type: ${value}`);
@@ -67,11 +172,27 @@ async function fetchTransactionHistory(
   if (params?.assetCode != null) where.assetCode = params.assetCode;
   if (params?.status != null) where.status = params.status;
 
-  return prisma.transaction.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: limit ?? REPORT_FETCH_LIMIT,
-  });
+  const records =
+    (await prisma.transaction.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit ?? REPORT_FETCH_LIMIT,
+    })) || [];
+
+  return records.map((tx) => ({
+    id: tx.id,
+    userId: tx.userId,
+    type: tx.type,
+    status: tx.status,
+    amount: tx.amount,
+    assetCode: tx.assetCode,
+    assetIssuer: tx.assetIssuer ?? '',
+    fromAddress: tx.fromAddress ?? '',
+    toAddress: tx.toAddress ?? '',
+    stellarTxId: tx.stellarTxId ?? '',
+    createdAt: tx.createdAt,
+    completedAt: tx.completedAt ?? '',
+  }));
 }
 
 async function fetchComplianceData(
@@ -79,27 +200,51 @@ async function fetchComplianceData(
   params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
-  const where: Record<string, unknown> = { userId };
+  const kycWhere: Record<string, unknown> = { userId };
+  if (params?.status != null) kycWhere.status = params.status;
 
-  if (params?.status != null) where.status = params.status;
+  const records =
+    (await prisma.kYCRecord.findMany({
+      where: kycWhere,
+      include: { user: { select: { email: true, firstName: true, lastName: true } } },
+      orderBy: { createdAt: 'desc' },
+      take: limit ?? REPORT_FETCH_LIMIT,
+    })) || [];
 
-  const records = await prisma.kYCRecord.findMany({
-    where,
-    include: { user: { select: { email: true, firstName: true, lastName: true } } },
-    orderBy: { createdAt: 'desc' },
-    take: limit ?? REPORT_FETCH_LIMIT,
-  });
+  const alerts =
+    (await prisma.complianceAlert.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      take: limit ?? REPORT_FETCH_LIMIT,
+    })) || [];
 
-  return records.map((record) => ({
+  const kycRows = records.map((record) => ({
     id: record.id,
-    userName: `${record.user.firstName ?? ''} ${record.user.lastName ?? ''}`.trim(),
+    type: 'KYC_RECORD',
+    userName: `${record.user?.firstName ?? ''} ${record.user?.lastName ?? ''}`.trim() || 'N/A',
     email: record.user?.email ?? '',
     provider: record.provider,
     status: record.status,
     documentType: record.documentType ?? '',
+    details: `Provider ID: ${record.providerId ?? 'N/A'}`,
     createdAt: record.createdAt,
-    reviewedAt: record.reviewedAt ?? undefined,
+    reviewedAt: record.reviewedAt ?? '',
   }));
+
+  const alertRows = alerts.map((alert) => ({
+    id: alert.id,
+    type: `ALERT_${alert.type.toUpperCase()}`,
+    userName: 'N/A',
+    email: 'N/A',
+    provider: 'INTERNAL_AML',
+    status: alert.status,
+    documentType: alert.severity,
+    details: `${alert.title}: ${alert.description ?? ''}`,
+    createdAt: alert.createdAt,
+    reviewedAt: alert.resolvedAt ?? '',
+  }));
+
+  return [...kycRows, ...alertRows];
 }
 
 async function fetchFinancialStatement(
@@ -117,11 +262,25 @@ async function fetchFinancialStatement(
       (where.createdAt as Record<string, unknown>).lte = new Date(params.endDate);
   }
 
-  return prisma.transaction.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: limit ?? REPORT_FETCH_LIMIT,
-  });
+  if (params?.assetCode != null) where.assetCode = params.assetCode;
+  if (params?.status != null) where.status = params.status;
+
+  const txs =
+    (await prisma.transaction.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit ?? REPORT_FETCH_LIMIT,
+    })) || [];
+
+  return txs.map((tx) => ({
+    transactionId: tx.id,
+    type: tx.type,
+    amount: tx.amount,
+    assetCode: tx.assetCode,
+    status: tx.status,
+    isFlagged: tx.isFlagged ? 'YES' : 'NO',
+    createdAt: tx.createdAt,
+  }));
 }
 
 async function fetchPayrollReport(
@@ -129,25 +288,49 @@ async function fetchPayrollReport(
   _params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
-  const batches = await prisma.payrollBatch.findMany({
-    where: { wallet: { userId } },
-    include: { items: true },
-    orderBy: { createdAt: 'desc' },
-    take: limit ?? REPORT_FETCH_LIMIT,
-  });
+  const batches =
+    (await prisma.payrollBatch.findMany({
+      where: { wallet: { userId } },
+      include: { items: true },
+      orderBy: { createdAt: 'desc' },
+      take: limit ?? REPORT_FETCH_LIMIT,
+    })) || [];
 
-  return batches.map((batch) => ({
-    id: batch.id,
-    name: batch.name,
-    description: batch.description ?? '',
-    status: batch.status,
-    itemCount: batch.items.length,
-    totalAmount:
-      batch.items.length > 0
-        ? Decimal.sum(...batch.items.map((item) => item.amount)).toString()
-        : new Decimal(0).toString(),
-    createdAt: batch.createdAt,
-  }));
+  if (batches.length === 0) {
+    return [];
+  }
+
+  return batches.flatMap((batch) => {
+    if (!batch.items || batch.items.length === 0) {
+      return [
+        {
+          batchId: batch.id,
+          batchName: batch.name,
+          description: batch.description ?? '',
+          batchStatus: batch.status,
+          itemCount: 0,
+          recipientAddress: 'N/A',
+          itemAmount: '0.00',
+          assetCode: 'N/A',
+          itemStatus: 'N/A',
+          createdAt: batch.createdAt,
+        },
+      ];
+    }
+
+    return batch.items.map((item) => ({
+      batchId: batch.id,
+      batchName: batch.name,
+      description: batch.description ?? '',
+      batchStatus: batch.status,
+      itemCount: batch.items.length,
+      recipientAddress: item.recipientAddress,
+      itemAmount: item.amount,
+      assetCode: item.assetCode,
+      itemStatus: item.status,
+      createdAt: batch.createdAt,
+    }));
+  });
 }
 
 async function fetchTreasuryReport(
@@ -155,20 +338,40 @@ async function fetchTreasuryReport(
   _params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
-  const wallets = await prisma.wallet.findMany({
-    where: { userId, walletType: 'treasury', isActive: true },
-    include: { balances: true },
-    take: limit ?? REPORT_FETCH_LIMIT,
-  });
+  const wallets =
+    (await prisma.wallet.findMany({
+      where: { userId, isActive: true },
+      include: { balances: true },
+      take: limit ?? REPORT_FETCH_LIMIT,
+    })) || [];
 
-  return wallets.flatMap((wallet) =>
-    wallet.balances.map((balance) => ({
+  return wallets.flatMap((wallet) => {
+    if (!wallet.balances || wallet.balances.length === 0) {
+      return [
+        {
+          walletId: wallet.id,
+          walletType: wallet.walletType,
+          network: wallet.network,
+          publicKey: wallet.publicKey,
+          assetCode: 'N/A',
+          assetIssuer: '',
+          balance: '0.00',
+          updatedAt: wallet.updatedAt,
+        },
+      ];
+    }
+
+    return wallet.balances.map((balance) => ({
       walletId: wallet.id,
+      walletType: wallet.walletType,
+      network: wallet.network,
+      publicKey: wallet.publicKey,
       assetCode: balance.assetCode,
       assetIssuer: balance.assetIssuer ?? '',
       balance: balance.balance,
-    }))
-  );
+      updatedAt: balance.updatedAt,
+    }));
+  });
 }
 
 async function fetchAuditLogs(
@@ -176,7 +379,10 @@ async function fetchAuditLogs(
   params?: ReportParameters,
   limit?: number
 ): Promise<ReportData[]> {
-  const where: Record<string, unknown> = { userId };
+  const where: Record<string, unknown> = {};
+  if (userId && userId !== 'system') {
+    where.userId = userId;
+  }
 
   if (params?.startDate != null || params?.endDate != null) {
     where.createdAt = {};
@@ -186,17 +392,31 @@ async function fetchAuditLogs(
       (where.createdAt as Record<string, unknown>).lte = new Date(params.endDate);
   }
 
-  return prisma.auditLog.findMany({
-    where,
-    orderBy: { createdAt: 'desc' },
-    take: limit ?? REPORT_FETCH_LIMIT,
-  });
+  const logs =
+    (await prisma.auditLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit ?? REPORT_FETCH_LIMIT,
+    })) || [];
+
+  return logs.map((log) => ({
+    id: log.id,
+    userId: log.userId ?? 'N/A',
+    action: log.action,
+    resource: log.resource,
+    resourceId: log.resourceId ?? '',
+    ipAddress: log.ipAddress ?? '',
+    userAgent: log.userAgent ?? '',
+    success: log.success ? 'SUCCESS' : 'FAILED',
+    createdAt: log.createdAt,
+  }));
 }
 
 export function getDataFetcher(
-  reportType: ReportType
+  reportType: ReportType | string
 ): ((userId: string, params?: ReportParameters, limit?: number) => Promise<ReportData[]>) | null {
-  switch (reportType) {
+  const normalized = String(reportType).replace(/_/g, '-');
+  switch (normalized) {
     case 'transaction-history':
       return fetchTransactionHistory;
     case 'compliance-report':
@@ -212,109 +432,4 @@ export function getDataFetcher(
     default:
       return null;
   }
-}
-
-const CSV_INJECTION_PREFIXES = ['=', '+', '-', '@'];
-
-function sanitizeCSVValue(value: unknown): unknown {
-  if (typeof value === 'string' && value.length > 0 && CSV_INJECTION_PREFIXES.includes(value[0])) {
-    return `'${value}`;
-  }
-  return value;
-}
-
-function sanitizeCSVRecord(record: ReportData): ReportData {
-  const sanitized: ReportData = {};
-  for (const [key, value] of Object.entries(record)) {
-    sanitized[key] = sanitizeCSVValue(value);
-  }
-  return sanitized;
-}
-
-export async function generateCSV(data: ReportData[], filePath: string): Promise<void> {
-  if (data.length === 0) {
-    fs.writeFileSync(filePath, '');
-    return;
-  }
-
-  const headers = Object.keys(data[0]).map((key) => ({ id: key, title: key }));
-  const writer = createObjectCsvWriter({ path: filePath, header: headers });
-  await writer.writeRecords(data.map(sanitizeCSVRecord));
-}
-
-export async function generatePDF(
-  data: ReportData[],
-  filePath: string,
-  title: string
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 30 });
-    const stream = fs.createWriteStream(filePath);
-
-    doc.pipe(stream);
-    doc.fontSize(18).text(title, { align: 'center' });
-    doc.moveDown();
-
-    if (data.length > 0) {
-      const headers = Object.keys(data[0]);
-      const colWidth = (doc.page.width - 60) / headers.length;
-
-      doc.fontSize(10).font('Helvetica-Bold');
-      let xPosition = 30;
-      let rowStartY = doc.y;
-      let maxRowHeight = 0;
-
-      headers.forEach((header) => {
-        doc.text(header, xPosition, rowStartY, { width: colWidth, align: 'left' });
-        const cellHeight = doc.heightOfString(header, { width: colWidth });
-        if (cellHeight > maxRowHeight) maxRowHeight = cellHeight;
-        xPosition += colWidth;
-      });
-
-      doc.y = rowStartY + maxRowHeight + 4;
-      doc.font('Helvetica').fontSize(8);
-
-      for (const row of data) {
-        if (doc.y > doc.page.height - 50) {
-          doc.addPage();
-        }
-
-        rowStartY = doc.y;
-        maxRowHeight = 0;
-        xPosition = 30;
-
-        headers.forEach((header) => {
-          const cellValue = row[header];
-          // eslint-disable-next-line @typescript-eslint/no-base-to-string
-          const displayValue = cellValue == null ? '' : String(cellValue);
-          doc.text(displayValue, xPosition, rowStartY, { width: colWidth, align: 'left' });
-          const cellHeight = doc.heightOfString(displayValue, { width: colWidth });
-          if (cellHeight > maxRowHeight) maxRowHeight = cellHeight;
-          xPosition += colWidth;
-        });
-
-        doc.y = rowStartY + maxRowHeight + 2;
-      }
-    } else {
-      doc.fontSize(12).text('No data available', { align: 'center' });
-    }
-
-    doc.end();
-    stream.on('finish', resolve);
-    stream.on('error', reject);
-  });
-}
-
-export async function generateXLSX(data: ReportData[], filePath: string): Promise<void> {
-  const workbook = new Workbook();
-  const worksheet = workbook.addWorksheet('Report');
-
-  if (data.length > 0) {
-    const headers = Object.keys(data[0]);
-
-    worksheet.columns = headers.map((header) => ({ header, key: header, width: 20 }));
-    data.forEach((row) => worksheet.addRow(row));
-  }
-
-  await workbook.xlsx.writeFile(filePath);
 }

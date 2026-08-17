@@ -57,6 +57,7 @@ docker-compose.override.yml
 tmp/
 temp/
 *.tmp
+uploads/
 
 # Secrets
 *.key

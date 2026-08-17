@@ -18,20 +18,12 @@ import type {
 } from '../types';
 
 import { reportWorker } from './report-worker.service';
-import { getFilePath, validateReportFormat } from './report.helpers';
-
-function getMimeType(format: ReportFormat): string {
-  const types: Record<ReportFormat, string> = {
-    csv: 'text/csv',
-    pdf: 'application/pdf',
-    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  };
-  return types[format];
-}
-
-function getFileName(reportType: ReportType, format: ReportFormat): string {
-  return `${reportType.replace(/-/g, '_')}_${Date.now()}.${format}`;
-}
+import {
+  getStorageAdapter,
+  getMimeType,
+  resolveFilename,
+  validateReportFormat,
+} from './report.helpers';
 
 function mapReport(report: {
   id: string;
@@ -43,6 +35,9 @@ function mapReport(report: {
   createdAt: Date;
   completedAt: Date | null;
   downloadUrl: string | null;
+  storageKey?: string | null;
+  fileSizeBytes?: number | null;
+  mimeType?: string | null;
 }): ReportRequest {
   return {
     id: report.id,
@@ -54,6 +49,9 @@ function mapReport(report: {
     createdAt: report.createdAt,
     completedAt: report.completedAt ?? undefined,
     downloadUrl: report.downloadUrl ?? undefined,
+    storageKey: report.storageKey ?? undefined,
+    fileSizeBytes: report.fileSizeBytes ?? undefined,
+    mimeType: report.mimeType ?? undefined,
   };
 }
 
@@ -169,16 +167,22 @@ export const ReportService = {
     }
 
     const format = validateReportFormat(report.format);
-    const filePath = getFilePath(id, format);
+    const storageAdapter = getStorageAdapter();
+    const storageKey = report.storageKey || `${id}.${format}`;
 
-    if (!fs.existsSync(filePath)) {
+    const exists = await storageAdapter.exists(storageKey);
+    if (!exists) {
       throw new AppError(404, 'Report file not found');
     }
 
+    const stream = storageAdapter.getReadStream(storageKey);
+    const filename = resolveFilename(report.reportType, format);
+    const mimetype = report.mimeType || getMimeType(format);
+
     return {
-      stream: fs.createReadStream(filePath),
-      filename: getFileName(report.reportType as ReportType, format),
-      mimetype: getMimeType(format),
+      stream,
+      filename,
+      mimetype,
     };
   },
 
