@@ -22,6 +22,9 @@ export interface ReportRequest {
   createdAt: Date;
   completedAt?: Date;
   downloadUrl?: string;
+  storageKey?: string;
+  fileSizeBytes?: number;
+  mimeType?: string;
 }
 
 export interface ReportTemplate {

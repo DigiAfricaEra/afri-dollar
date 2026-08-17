@@ -1,5 +1,3 @@
-import fs from 'fs';
-
 import { Prisma } from '@afri-dollar/database';
 import Bull from 'bull';
 
@@ -7,21 +5,13 @@ import prisma from '../config/database';
 import { AppError } from '../types';
 import type { ReportParameters } from '../types';
 
-import {
-  generateCSV,
-  generatePDF,
-  generateXLSX,
-  getDataFetcher,
-  getFilePath,
-  validateReportType,
-  validateReportFormat,
-} from './report.helpers';
+import { getStorageAdapter, validateReportType, validateReportFormat } from './report.helpers';
+import { generateReportFile } from './reports';
 
-const REPORT_WORKER_QUEUE = 'report-generation';
+const REPORT_WORKER_QUEUE = 'reports';
 const WORKER_CONCURRENCY = 3;
-const FETCH_LIMIT = 10_000;
 const RETRY_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 30_000;
+const RETRY_DELAY_MS = 10_000;
 
 type ReportJobPayload = {
   requestId?: string;
@@ -47,9 +37,9 @@ function isTransientError(error: unknown): boolean {
   return true;
 }
 
-async function processReport(requestId: string): Promise<void> {
+export async function processReport(requestId: string): Promise<void> {
   const result = await prisma.reportRequest.updateMany({
-    where: { id: requestId, status: 'pending' },
+    where: { id: requestId, status: { in: ['pending', 'failed'] } },
     data: { status: 'generating' },
   });
 
@@ -62,44 +52,36 @@ async function processReport(requestId: string): Promise<void> {
   if (!report) return;
 
   const reportType = validateReportType(report.reportType);
-  const fetcher = getDataFetcher(reportType);
-
-  if (!fetcher) {
-    throw new AppError(400, `Unknown report type: ${report.reportType}`);
-  }
-
-  const params = report.parameters as ReportParameters | undefined;
-  const data = await fetcher(report.userId, params, FETCH_LIMIT);
-
   const format = validateReportFormat(report.format);
-  const filePath = getFilePath(requestId, format);
-  const tempPath = `${filePath}.tmp`;
+  const parameters = (report.parameters as ReportParameters | undefined) ?? {};
 
-  switch (format) {
-    case 'csv':
-      await generateCSV(data, tempPath);
-      break;
-    case 'pdf':
-      await generatePDF(data, tempPath, `${report.reportType} Report`);
-      break;
-    case 'xlsx':
-      await generateXLSX(data, tempPath);
-      break;
-  }
+  const storageAdapter = getStorageAdapter();
 
-  fs.renameSync(tempPath, filePath);
+  const resultMeta = await generateReportFile(
+    {
+      id: report.id,
+      userId: report.userId,
+      reportType,
+      format,
+      parameters,
+    },
+    storageAdapter
+  );
 
   await prisma.reportRequest.update({
     where: { id: requestId },
     data: {
       status: 'completed',
       completedAt: new Date(),
-      downloadUrl: `/api/v1/reports/${requestId}/download`,
+      storageKey: resultMeta.storageKey,
+      fileSizeBytes: resultMeta.fileSizeBytes,
+      mimeType: resultMeta.mimeType,
+      downloadUrl: resultMeta.downloadUrl,
     },
   });
 }
 
-async function processScheduledReport(templateId: string): Promise<void> {
+export async function processScheduledReport(templateId: string): Promise<void> {
   const template = await prisma.reportTemplate.findUnique({
     where: { id: templateId },
   });
@@ -121,7 +103,7 @@ async function processScheduledReport(templateId: string): Promise<void> {
 function buildJobOptions(): Bull.JobOptions {
   return {
     attempts: RETRY_ATTEMPTS,
-    backoff: { type: 'fixed', delay: RETRY_DELAY_MS },
+    backoff: { type: 'exponential', delay: RETRY_DELAY_MS },
     removeOnComplete: 100,
     removeOnFail: 100,
   };
@@ -164,17 +146,18 @@ export class ReportWorkerService {
     this.status = 'ready';
   }
 
-  private async processReportWithRetry(
-    job: Bull.Job<ReportJobPayload>,
-    requestId: string
-  ): Promise<void> {
+  async processReportWithRetry(job: Bull.Job<ReportJobPayload>, requestId: string): Promise<void> {
     try {
       await processReport(requestId);
     } catch (error) {
       const message = getErrorMessage(error);
-      console.error(`Report generation failed for ${requestId}:`, message);
+      console.error(
+        `Report generation failed for ${requestId} (attempt ${job.attemptsMade}):`,
+        message
+      );
 
-      const isLastAttempt = job.attemptsMade >= (job.opts.attempts || 1);
+      const maxAttempts = job.opts.attempts || RETRY_ATTEMPTS;
+      const isLastAttempt = job.attemptsMade >= maxAttempts;
 
       if (isTransientError(error) && !isLastAttempt) {
         await prisma.reportRequest
@@ -218,6 +201,11 @@ export class ReportWorkerService {
 
   async enqueue(requestId: string): Promise<void> {
     if (!this.queue) {
+      // In development / testing without Redis, fallback to inline processing or throw service unavailable
+      if (process.env.NODE_ENV === 'test') {
+        await processReport(requestId);
+        return;
+      }
       throw new AppError(503, 'Report worker is not initialized');
     }
 
