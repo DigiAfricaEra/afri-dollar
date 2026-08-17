@@ -83,6 +83,25 @@ async function logAudit(
   }
 }
 
+async function assertPaymentNotComplianceBlocked(
+  userId: string,
+  paymentId: string,
+  transaction: Transaction
+): Promise<void> {
+  if (!transaction.isFlagged || transaction.flagReviewAction === 'release') {
+    return;
+  }
+
+  const blocked = transaction.flagReviewAction === 'block';
+  await logAudit(userId, 'payment_process_blocked', paymentId, false, {
+    reason: blocked ? 'blocked_by_compliance_review' : 'flagged_for_compliance_review',
+    flagReviewAction: transaction.flagReviewAction,
+  });
+  throw new Error(
+    blocked ? 'Payment is blocked by compliance review' : 'Payment is flagged for compliance review'
+  );
+}
+
 const SANCTIONED_COUNTRIES = ['KP', 'IR', 'SY', 'CU'];
 
 async function performSanctionsScreening(
@@ -297,18 +316,7 @@ export const PaymentService = {
       throw new Error('Only created payments can be processed');
     }
 
-    if (transaction.isFlagged && transaction.flagReviewAction !== 'release') {
-      const blocked = transaction.flagReviewAction === 'block';
-      await logAudit(userId, 'payment_process_blocked', paymentId, false, {
-        reason: blocked ? 'blocked_by_compliance_review' : 'flagged_for_compliance_review',
-        flagReviewAction: transaction.flagReviewAction,
-      });
-      throw new Error(
-        blocked
-          ? 'Payment is blocked by compliance review'
-          : 'Payment is flagged for compliance review'
-      );
-    }
+    await assertPaymentNotComplianceBlocked(userId, paymentId, transaction);
 
     const updateCount = await prisma.transaction.updateMany({
       where: { id: paymentId, status: 'created' },

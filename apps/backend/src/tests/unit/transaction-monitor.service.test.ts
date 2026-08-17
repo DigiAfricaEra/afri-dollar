@@ -40,6 +40,16 @@ const mockTransactionFindMany = prisma.transaction.findMany as jest.Mock;
 const mockTransactionUpdateMany = prisma.transaction.updateMany as jest.Mock;
 const mockComplianceAlertCreate = prisma.complianceAlert.create as jest.Mock;
 
+function resetMonitorMocks(): void {
+  jest.clearAllMocks();
+  resetConfigCacheForTests();
+  mockSystemConfigFindMany.mockResolvedValue([]);
+  mockTransactionCount.mockResolvedValue(0);
+  mockTransactionFindMany.mockResolvedValue([]);
+  mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
+  mockComplianceAlertCreate.mockResolvedValue({});
+}
+
 const baseTransaction = {
   id: 'tx-1',
   userId: 'user-1',
@@ -50,15 +60,7 @@ const baseTransaction = {
 };
 
 describe('TransactionMonitorService', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-    resetConfigCacheForTests();
-    mockSystemConfigFindMany.mockResolvedValue([]);
-    mockTransactionCount.mockResolvedValue(0);
-    mockTransactionFindMany.mockResolvedValue([]);
-    mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
-    mockComplianceAlertCreate.mockResolvedValue({});
-  });
+  beforeEach(resetMonitorMocks);
 
   describe('evaluate', () => {
     it('flags a transaction above the large transaction threshold as high severity LARGE_TX', async () => {

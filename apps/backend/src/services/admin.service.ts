@@ -279,6 +279,84 @@ async function writeAdminAudit(params: {
   });
 }
 
+async function performReviewTransition(
+  tx: Prisma.TransactionClient,
+  params: {
+    id: string;
+    action: FlagReviewAction;
+    adminUserId: string;
+    note?: string;
+    ipAddress?: string;
+    userAgent?: string;
+  }
+): Promise<
+  Prisma.TransactionGetPayload<{
+    include: { user: { select: { id: true; email: true; status: true } } };
+  }>
+> {
+  const claimed = await tx.transaction.updateMany({
+    where: {
+      id: params.id,
+      isFlagged: true,
+      OR: [{ flagReviewAction: null }, { flagReviewAction: 'reviewing' }],
+    },
+    data: {
+      flagReviewAction: params.action,
+      ...(params.action === 'reviewing'
+        ? {}
+        : {
+            resolvedBy: params.adminUserId,
+            resolvedAt: new Date(),
+            resolutionNote: params.note ?? null,
+          }),
+    },
+  });
+
+  if (claimed.count === 0) {
+    throw new AppError(409, 'Transaction review is already in progress or has been resolved');
+  }
+
+  if (params.action !== 'reviewing') {
+    await tx.complianceAlert.updateMany({
+      where: { transactionId: params.id, status: 'open' },
+      data: {
+        status: params.action === 'release' ? 'resolved' : 'dismissed',
+        resolvedAt: new Date(),
+        resolvedBy: params.adminUserId,
+        resolutionNote: params.note,
+      },
+    });
+  }
+
+  await tx.auditLog.create({
+    data: {
+      userId: params.adminUserId,
+      action: 'tx.flag_review',
+      resource: 'transaction',
+      resourceId: params.id,
+      metadata: { action: params.action, note: params.note },
+      ipAddress: params.ipAddress,
+      userAgent: params.userAgent,
+      success: true,
+    },
+  });
+
+  const reviewed = await tx.transaction.findUnique({
+    where: { id: params.id },
+    include: {
+      user: {
+        select: { id: true, email: true, status: true },
+      },
+    },
+  });
+
+  if (!reviewed) {
+    throw new AppError(404, 'Transaction not found');
+  }
+
+  return reviewed;
+}
+
 export const AdminService = {
   async listUsers(
     filters: AdminListUsersFilters
@@ -570,69 +648,16 @@ export const AdminService = {
       throw new AppError(400, 'Transaction is not flagged');
     }
 
-    const updated = await prisma.$transaction(async (tx) => {
-      const claimed = await tx.transaction.updateMany({
-        where: {
-          id,
-          isFlagged: true,
-          OR: [{ flagReviewAction: null }, { flagReviewAction: 'reviewing' }],
-        },
-        data: {
-          flagReviewAction: action,
-          ...(action === 'reviewing'
-            ? {}
-            : {
-                resolvedBy: adminUserId,
-                resolvedAt: new Date(),
-                resolutionNote: options?.note ?? null,
-              }),
-        },
-      });
-
-      if (claimed.count === 0) {
-        throw new AppError(409, 'Transaction review is already in progress or has been resolved');
-      }
-
-      if (action !== 'reviewing') {
-        await tx.complianceAlert.updateMany({
-          where: { transactionId: id, status: 'open' },
-          data: {
-            status: action === 'release' ? 'resolved' : 'dismissed',
-            resolvedAt: new Date(),
-            resolvedBy: adminUserId,
-            resolutionNote: options?.note,
-          },
-        });
-      }
-
-      await tx.auditLog.create({
-        data: {
-          userId: adminUserId,
-          action: 'tx.flag_review',
-          resource: 'transaction',
-          resourceId: id,
-          metadata: { action, note: options?.note },
-          ipAddress: options?.ipAddress,
-          userAgent: options?.userAgent,
-          success: true,
-        },
-      });
-
-      const reviewed = await tx.transaction.findUnique({
-        where: { id },
-        include: {
-          user: {
-            select: { id: true, email: true, status: true },
-          },
-        },
-      });
-
-      if (!reviewed) {
-        throw new AppError(404, 'Transaction not found');
-      }
-
-      return reviewed;
-    });
+    const updated = await prisma.$transaction((tx) =>
+      performReviewTransition(tx, {
+        id,
+        action,
+        adminUserId,
+        note: options?.note,
+        ipAddress: options?.ipAddress,
+        userAgent: options?.userAgent,
+      })
+    );
 
     return mapTransaction(updated);
   },

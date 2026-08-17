@@ -133,7 +133,10 @@ async function getMonitorConfig(): Promise<MonitorConfig> {
     const rows = await prisma.systemConfig.findMany({
       where: { key: { startsWith: 'monitor.' } },
     });
-    const values = new Map(rows.map((row) => [row.key, row.value]));
+    const values = new Map<string, Prisma.JsonValue>();
+    for (const row of rows) {
+      values.set(row.key, row.value);
+    }
 
     const severityByRule: Record<MonitorRuleId, MonitorSeverity> = { ...DEFAULT_SEVERITY_BY_RULE };
     for (const ruleId of Object.keys(DEFAULT_SEVERITY_BY_RULE) as MonitorRuleId[]) {
@@ -201,12 +204,13 @@ async function getMonitorConfig(): Promise<MonitorConfig> {
   }
 }
 
-async function countRecentTransactions(userId: string, windowMinutes: number): Promise<number> {
-  const since = new Date(Date.now() - windowMinutes * 60_000);
-  return prisma.transaction.count({
-    where: { userId, createdAt: { gte: since } },
+const countRecentTransactions = (userId: string, windowMinutes: number): Promise<number> =>
+  prisma.transaction.count({
+    where: {
+      userId,
+      createdAt: { gte: new Date(Date.now() - windowMinutes * 60_000) },
+    },
   });
-}
 
 function filterStructuringCandidates(
   windowRows: StructuringCandidate[],
@@ -228,6 +232,24 @@ function filterStructuringCandidates(
     }
     return candidate.id <= transaction.id;
   });
+}
+
+async function applyVelocityRule(
+  alerts: MonitorRuleResult[],
+  transaction: MonitorableTransaction,
+  config: MonitorConfig
+): Promise<void> {
+  const recentCount = await countRecentTransactions(
+    transaction.userId,
+    config.velocityWindowMinutes
+  );
+  if (recentCount > config.velocityTxLimit) {
+    alerts.push({
+      ruleId: 'VELOCITY',
+      severity: config.severityByRule.VELOCITY,
+      message: `${recentCount} transactions from the same user within ${config.velocityWindowMinutes} minutes`,
+    });
+  }
 }
 
 async function collectStructuringCandidates(
@@ -286,73 +308,157 @@ async function claimFlag(
   return true;
 }
 
+async function evaluateTransaction(
+  transaction: MonitorableTransaction
+): Promise<TransactionMonitorResult> {
+  const config = await getMonitorConfig();
+  const alerts: MonitorRuleResult[] = [];
+
+  const amount = parseAmount(transaction.amount);
+  if (amount === null) {
+    alerts.push({
+      ruleId: 'UNPARSEABLE_AMOUNT',
+      severity: config.severityByRule.UNPARSEABLE_AMOUNT,
+      message: `Amount ${transaction.amount} could not be parsed and requires manual review`,
+    });
+  } else {
+    if (amount > config.largeTxThresholdUsd) {
+      alerts.push({
+        ruleId: 'LARGE_TX',
+        severity: config.severityByRule.LARGE_TX,
+        message: `Amount ${transaction.amount} exceeds the large transaction threshold of ${config.largeTxThresholdUsd}`,
+      });
+    }
+
+    if (amount >= config.roundAmountFloorUsd && amount % config.roundAmountModulus === 0) {
+      alerts.push({
+        ruleId: 'ROUND_AMOUNT',
+        severity: config.severityByRule.ROUND_AMOUNT,
+        message: `Amount ${transaction.amount} is a round number`,
+      });
+    }
+  }
+
+  const country = getBeneficiaryCountry(transaction.metadata);
+  if (country !== null && config.highRiskCountries.includes(country)) {
+    alerts.push({
+      ruleId: 'HIGH_RISK_COUNTRY',
+      severity: config.severityByRule.HIGH_RISK_COUNTRY,
+      message: `Destination country ${country} is high risk`,
+    });
+  }
+
+  await applyVelocityRule(alerts, transaction, config);
+
+  const structuringSince = new Date(
+    transaction.createdAt.getTime() - config.structuringWindowHours * 3_600_000
+  );
+  const candidates = await collectStructuringCandidates(transaction, structuringSince, config);
+  if (candidates.length >= config.structuringTxCount) {
+    alerts.push({
+      ruleId: 'STRUCTURING',
+      severity: config.severityByRule.STRUCTURING,
+      message: `${candidates.length} transactions within the structuring band in the last ${config.structuringWindowHours} hours`,
+    });
+  }
+
+  return { flagged: alerts.length > 0, alerts };
+}
+
+async function screenRow(
+  row: { id: string; userId: string; createdAt: Date },
+  since: Date,
+  config: MonitorConfig,
+  windowByUser: Map<string, StructuringCandidate[]>
+): Promise<'flagged' | 'not-flagged'> {
+  let windowRows = windowByUser.get(row.userId);
+  if (!windowRows) {
+    windowRows = await prisma.transaction.findMany({
+      where: {
+        userId: row.userId,
+        createdAt: { gte: since },
+        status: { in: ['created', 'pending'] },
+      },
+      select: { id: true, amount: true, createdAt: true },
+    });
+    windowByUser.set(row.userId, windowRows);
+  }
+
+  const candidates = filterStructuringCandidates(windowRows, row, config);
+  if (candidates.length < config.structuringTxCount) {
+    return 'not-flagged';
+  }
+
+  const claimed = await prisma.$transaction((client) =>
+    claimFlag(
+      client,
+      row,
+      'STRUCTURING',
+      config.severityByRule.STRUCTURING,
+      'Transaction flagged by STRUCTURING',
+      'Transaction flagged by STRUCTURING',
+      {
+        ruleId: 'STRUCTURING',
+        matchCount: candidates.length,
+        windowHours: config.structuringWindowHours,
+      }
+    )
+  );
+
+  return claimed ? 'flagged' : 'not-flagged';
+}
+
+async function screenWindow(config: MonitorConfig, since: Date): Promise<ScreenTransactionsResult> {
+  let scanned = 0;
+  let flagged = 0;
+  let failed = 0;
+  let cursor: string | undefined;
+  const windowByUser = new Map<string, StructuringCandidate[]>();
+
+  for (;;) {
+    const rows = await prisma.transaction.findMany({
+      where: {
+        createdAt: { gte: since },
+        status: { in: ['created', 'pending'] },
+        isFlagged: false,
+      },
+      orderBy: { id: 'asc' },
+      take: SCREEN_PAGE_SIZE,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      select: {
+        id: true,
+        userId: true,
+        createdAt: true,
+      },
+    });
+
+    if (rows.length === 0) {
+      break;
+    }
+
+    for (const row of rows) {
+      scanned += 1;
+      try {
+        const outcome = await screenRow(row, since, config, windowByUser);
+        if (outcome === 'flagged') {
+          flagged += 1;
+        }
+      } catch (error) {
+        failed += 1;
+        console.error(`Failed to screen transaction ${row.id}:`, error);
+      }
+    }
+
+    cursor = rows[rows.length - 1].id;
+  }
+
+  return { scanned, flagged, failed };
+}
+
 export const TransactionMonitorService = {
   getMonitorConfig,
 
-  async evaluate(transaction: MonitorableTransaction): Promise<TransactionMonitorResult> {
-    const config = await getMonitorConfig();
-    const alerts: MonitorRuleResult[] = [];
-
-    const amount = parseAmount(transaction.amount);
-    if (amount === null) {
-      alerts.push({
-        ruleId: 'UNPARSEABLE_AMOUNT',
-        severity: config.severityByRule.UNPARSEABLE_AMOUNT,
-        message: `Amount ${transaction.amount} could not be parsed and requires manual review`,
-      });
-    } else {
-      if (amount > config.largeTxThresholdUsd) {
-        alerts.push({
-          ruleId: 'LARGE_TX',
-          severity: config.severityByRule.LARGE_TX,
-          message: `Amount ${transaction.amount} exceeds the large transaction threshold of ${config.largeTxThresholdUsd}`,
-        });
-      }
-
-      if (amount >= config.roundAmountFloorUsd && amount % config.roundAmountModulus === 0) {
-        alerts.push({
-          ruleId: 'ROUND_AMOUNT',
-          severity: config.severityByRule.ROUND_AMOUNT,
-          message: `Amount ${transaction.amount} is a round number`,
-        });
-      }
-    }
-
-    const country = getBeneficiaryCountry(transaction.metadata);
-    if (country !== null && config.highRiskCountries.includes(country)) {
-      alerts.push({
-        ruleId: 'HIGH_RISK_COUNTRY',
-        severity: config.severityByRule.HIGH_RISK_COUNTRY,
-        message: `Destination country ${country} is high risk`,
-      });
-    }
-
-    const recentCount = await countRecentTransactions(
-      transaction.userId,
-      config.velocityWindowMinutes
-    );
-    if (recentCount > config.velocityTxLimit) {
-      alerts.push({
-        ruleId: 'VELOCITY',
-        severity: config.severityByRule.VELOCITY,
-        message: `${recentCount} transactions from the same user within ${config.velocityWindowMinutes} minutes`,
-      });
-    }
-
-    const structuringSince = new Date(
-      transaction.createdAt.getTime() - config.structuringWindowHours * 3_600_000
-    );
-    const candidates = await collectStructuringCandidates(transaction, structuringSince, config);
-    if (candidates.length >= config.structuringTxCount) {
-      alerts.push({
-        ruleId: 'STRUCTURING',
-        severity: config.severityByRule.STRUCTURING,
-        message: `${candidates.length} transactions within the structuring band in the last ${config.structuringWindowHours} hours`,
-      });
-    }
-
-    return { flagged: alerts.length > 0, alerts };
-  },
+  evaluate: evaluateTransaction,
 
   async applyFlags(
     transaction: MonitorableTransaction,
@@ -382,79 +488,6 @@ export const TransactionMonitorService = {
   async screenPastTransactions(): Promise<ScreenTransactionsResult> {
     const config = await getMonitorConfig();
     const since = new Date(Date.now() - config.structuringWindowHours * 3_600_000);
-    let scanned = 0;
-    let flagged = 0;
-    let failed = 0;
-    let cursor: string | undefined;
-    const windowByUser = new Map<string, StructuringCandidate[]>();
-
-    for (;;) {
-      const rows = await prisma.transaction.findMany({
-        where: {
-          createdAt: { gte: since },
-          status: { in: ['created', 'pending'] },
-          isFlagged: false,
-        },
-        orderBy: { id: 'asc' },
-        take: SCREEN_PAGE_SIZE,
-        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-        select: {
-          id: true,
-          userId: true,
-          createdAt: true,
-        },
-      });
-
-      if (rows.length === 0) {
-        break;
-      }
-
-      for (const row of rows) {
-        scanned += 1;
-        try {
-          let windowRows = windowByUser.get(row.userId);
-          if (!windowRows) {
-            windowRows = await prisma.transaction.findMany({
-              where: {
-                userId: row.userId,
-                createdAt: { gte: since },
-                status: { in: ['created', 'pending'] },
-              },
-              select: { id: true, amount: true, createdAt: true },
-            });
-            windowByUser.set(row.userId, windowRows);
-          }
-
-          const candidates = filterStructuringCandidates(windowRows, row, config);
-          if (candidates.length >= config.structuringTxCount) {
-            const claimed = await prisma.$transaction((client) =>
-              claimFlag(
-                client,
-                row,
-                'STRUCTURING',
-                config.severityByRule.STRUCTURING,
-                `Transaction flagged by STRUCTURING`,
-                `Transaction flagged by STRUCTURING`,
-                {
-                  ruleId: 'STRUCTURING',
-                  matchCount: candidates.length,
-                  windowHours: config.structuringWindowHours,
-                }
-              )
-            );
-            if (claimed) {
-              flagged += 1;
-            }
-          }
-        } catch (error) {
-          failed += 1;
-          console.error(`Failed to screen transaction ${row.id}:`, error);
-        }
-      }
-
-      cursor = rows[rows.length - 1].id;
-    }
-
-    return { scanned, flagged, failed };
+    return screenWindow(config, since);
   },
 };
