@@ -2,8 +2,8 @@ extern crate afri_contract_shared;
 
 use afri_contract_shared::{publish_admin_action, publish_transfer};
 use soroban_sdk::{
-    contract, contractimpl, symbol_short, testutils::Address as _, testutils::Events, Address, Env,
-    IntoVal, Symbol,
+    contract, contractimpl, symbol_short, testutils::Address as _, testutils::Events, vec, Address,
+    Env, IntoVal, Symbol,
 };
 
 // ---------------------------------------------------------------------------
