@@ -43,10 +43,7 @@ fn non_admin_requires_auth_succeeds_with_mock() {
     let admin = Address::generate(&env);
     let user = Address::generate(&env);
     env.as_contract(&contract_id, || {
-        assert_eq!(
-            require_auth_or_admin(&env, &user, Some(&admin)),
-            Ok(())
-        );
+        assert_eq!(require_auth_or_admin(&env, &user, Some(&admin)), Ok(()));
     });
 }
 
@@ -88,9 +85,6 @@ fn different_admin_from_caller() {
     let user = Address::generate(&env);
     // user != admin, so auth is required (mocked).
     env.as_contract(&contract_id, || {
-        assert_eq!(
-            require_auth_or_admin(&env, &user, Some(&admin)),
-            Ok(())
-        );
+        assert_eq!(require_auth_or_admin(&env, &user, Some(&admin)), Ok(()));
     });
 }
