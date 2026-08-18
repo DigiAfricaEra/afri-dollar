@@ -12,6 +12,7 @@ import {
 import prisma from '../config/database';
 import { decrypt } from '../utils/crypto';
 
+import { NotificationService } from './notification.service';
 import { StellarService } from './stellar.service';
 import { WebhookService } from './webhook.service';
 
@@ -583,6 +584,15 @@ export const PayrollService = {
         failed: result.failed,
       },
       userId,
+    });
+
+    await NotificationService.notify(userId, 'payroll-processed', {
+      batchName: batch.name,
+      count: result.successful,
+      total: String(batch.items.reduce((sum, item) => sum + Number(item.amount), 0)),
+      currency: batch.items[0]?.assetCode ?? 'XLM',
+    }).catch((err: unknown) => {
+      console.error('[PayrollService] Failed to send payroll notification:', err);
     });
 
     return result;

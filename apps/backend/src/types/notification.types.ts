@@ -1,13 +1,18 @@
+export type NotificationChannel = 'email' | 'sms' | 'push';
+
+export type NotificationStatus = 'pending' | 'sent' | 'delivered' | 'failed';
+
 export interface Notification {
   id: string;
   userId: string;
-  type: 'email' | 'sms' | 'push';
-  channel: 'email' | 'sms' | 'push';
+  type: NotificationType;
+  channel: NotificationChannel;
   template: string;
   data: Record<string, unknown>;
-  status: 'pending' | 'sent' | 'delivered' | 'failed';
+  status: NotificationStatus;
   sentAt?: Date;
-  deliveredAt?: Date;
+  readAt?: Date;
+  createdAt?: Date;
 }
 
 export interface NotificationPreferences {
@@ -30,11 +35,13 @@ export interface NotificationTemplate {
 }
 
 export interface PushSubscription {
+  id?: string;
   endpoint: string;
   keys: {
     p256dh: string;
     auth: string;
   };
+  userAgent?: string;
 }
 
 export type NotificationType =

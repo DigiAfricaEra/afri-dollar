@@ -1,3 +1,6 @@
+import type { Prisma } from '@afri-dollar/database';
+
+import prisma from '../config/database';
 import type {
   Notification,
   NotificationPreferences,
@@ -5,12 +8,6 @@ import type {
   PushSubscription,
   NotificationType,
 } from '../types/notification.types';
-
-// ---------------------------------------------------------------------------
-// In-memory stores (replace with DB persistence in production)
-// ---------------------------------------------------------------------------
-const notificationStore: Notification[] = [];
-const preferencesStore: Map<string, NotificationPreferences> = new Map();
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -83,10 +80,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number = PROVIDER_TIMEOU
   });
 }
 
-function generateId(): string {
-  return `notif_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-}
-
 function escapeHtml(str: string): string {
   return str
     .replace(/&/g, '&amp;')
@@ -102,21 +95,63 @@ function renderTemplate(template: string, data: Record<string, unknown>): string
   );
 }
 
-function getDefaultPreferences(userId: string): NotificationPreferences {
+function toPreferences(row: {
+  userId: string;
+  email: boolean;
+  sms: boolean;
+  push: boolean;
+  transactionAlerts: boolean;
+  securityAlerts: boolean;
+  payrollAlerts: boolean;
+  marketing: boolean;
+}): NotificationPreferences {
   return {
-    userId,
-    email: true,
-    sms: true,
-    push: true,
-    transactionAlerts: true,
-    securityAlerts: true,
-    payrollAlerts: true,
-    marketing: false,
+    userId: row.userId,
+    email: row.email,
+    sms: row.sms,
+    push: row.push,
+    transactionAlerts: row.transactionAlerts,
+    securityAlerts: row.securityAlerts,
+    payrollAlerts: row.payrollAlerts,
+    marketing: row.marketing,
   };
 }
 
-function getUserPreferences(userId: string): NotificationPreferences {
-  return preferencesStore.get(userId) ?? getDefaultPreferences(userId);
+function toNotification(row: {
+  id: string;
+  userId: string;
+  type: string;
+  channel: 'email' | 'sms' | 'push';
+  template: string;
+  data: Prisma.JsonValue;
+  status: 'pending' | 'sent' | 'delivered' | 'failed';
+  sentAt: Date | null;
+  readAt: Date | null;
+  createdAt: Date;
+}): Notification {
+  return {
+    id: row.id,
+    userId: row.userId,
+    type: row.type as NotificationType,
+    channel: row.channel,
+    template: row.template,
+    data: (row.data ?? {}) as Record<string, unknown>,
+    status: row.status,
+    sentAt: row.sentAt ?? undefined,
+    readAt: row.readAt ?? undefined,
+    createdAt: row.createdAt,
+  };
+}
+
+function toWebPushSubscription(row: {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+}): PushSubscription {
+  return {
+    endpoint: row.endpoint,
+    keys: { p256dh: row.p256dh, auth: row.auth },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -258,15 +293,23 @@ export const NotificationService = {
   },
 
   /**
-   * High-level notify: checks user preferences and dispatches across all
-   * enabled channels concurrently.
+   * High-level notify: reads preferences and recipient contact info from the
+   * database, then dispatches across all enabled channels concurrently while
+   * persisting a per-channel Notification row.
    */
   async notify(
     userId: string,
     type: NotificationType,
     data: Record<string, unknown>
   ): Promise<void> {
-    const prefs = getUserPreferences(userId);
+    const [prefs, user, pushSubscriptions] = await Promise.all([
+      this.getPreferences(userId),
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true, phoneNumber: true },
+      }),
+      prisma.pushSubscription.findMany({ where: { userId } }),
+    ]);
 
     // Determine whether to send based on notification category
     const isTransactionEvent = type === 'transaction-completed' || type === 'transaction-failed';
@@ -287,47 +330,62 @@ export const NotificationService = {
     const body = renderTemplate(tmpl.body, data);
     const subject = tmpl.subject ? renderTemplate(tmpl.subject, data) : 'Notification';
 
+    const email = typeof data.email === 'string' ? data.email : (user?.email ?? undefined);
+    const phone = typeof data.phone === 'string' ? data.phone : (user?.phoneNumber ?? undefined);
+
     const channels: Array<'email' | 'sms' | 'push'> = [];
     if (prefs.email) channels.push('email');
     if (prefs.sms) channels.push('sms');
     if (prefs.push) channels.push('push');
 
     const channelTasks = channels.map(async (channel) => {
-      const notif: Notification = {
-        id: generateId(),
-        userId,
-        type: channel,
-        channel,
-        template: type,
-        data,
-        status: 'pending',
-      };
-      notificationStore.push(notif);
+      const notif = await prisma.notification.create({
+        data: {
+          userId,
+          type,
+          channel,
+          template: type,
+          data: data as Prisma.InputJsonValue,
+          status: 'pending',
+        },
+      });
 
       try {
-        if (channel === 'email' && typeof data.email === 'string') {
-          await deliverEmail(data.email, subject, body);
-          notif.status = 'sent';
-          notif.sentAt = new Date();
-        } else if (channel === 'sms' && typeof data.phone === 'string') {
-          await deliverSMS(data.phone, body);
-          notif.status = 'sent';
-          notif.sentAt = new Date();
-        } else if (channel === 'push' && data.pushSubscription != null) {
-          await deliverPush(data.pushSubscription as PushSubscription, {
-            title: subject,
-            body,
-            type,
+        if (channel === 'email' && email) {
+          await deliverEmail(email, subject, body);
+          await prisma.notification.update({
+            where: { id: notif.id },
+            data: { status: 'sent', sentAt: new Date() },
           });
-          notif.status = 'sent';
-          notif.sentAt = new Date();
+        } else if (channel === 'sms' && phone) {
+          await deliverSMS(phone, body);
+          await prisma.notification.update({
+            where: { id: notif.id },
+            data: { status: 'sent', sentAt: new Date() },
+          });
+        } else if (channel === 'push' && pushSubscriptions.length > 0) {
+          await Promise.all(
+            pushSubscriptions.map((sub) =>
+              deliverPush(toWebPushSubscription(sub), { title: subject, body, type })
+            )
+          );
+          await prisma.notification.update({
+            where: { id: notif.id },
+            data: { status: 'sent', sentAt: new Date() },
+          });
         } else {
           // Recipient info not available for this channel; mark as failed
-          notif.status = 'failed';
+          await prisma.notification.update({
+            where: { id: notif.id },
+            data: { status: 'failed' },
+          });
         }
       } catch (err) {
         console.error(`[NotificationService] Failed to send ${channel} notification:`, err);
-        notif.status = 'failed';
+        await prisma.notification.update({
+          where: { id: notif.id },
+          data: { status: 'failed' },
+        });
       }
     });
 
@@ -335,30 +393,157 @@ export const NotificationService = {
   },
 
   /**
-   * Update notification preferences for a user.
+   * Update notification preferences for a user (creates defaults on first write).
    */
   async updatePreferences(
     userId: string,
     preferences: Partial<NotificationPreferences>
   ): Promise<NotificationPreferences> {
-    const existing = getUserPreferences(userId);
-    const updated: NotificationPreferences = { ...existing, ...preferences, userId };
-    preferencesStore.set(userId, updated);
-    return updated;
+    const updates = {
+      email: preferences.email,
+      sms: preferences.sms,
+      push: preferences.push,
+      transactionAlerts: preferences.transactionAlerts,
+      securityAlerts: preferences.securityAlerts,
+      payrollAlerts: preferences.payrollAlerts,
+      marketing: preferences.marketing,
+    };
+
+    const updated = await prisma.notificationPreference.upsert({
+      where: { userId },
+      update: updates,
+      create: { userId, ...updates },
+    });
+
+    return toPreferences(updated);
   },
 
   /**
-   * Get notification preferences for a user.
+   * Get notification preferences for a user (creates defaults on first access).
    */
   async getPreferences(userId: string): Promise<NotificationPreferences> {
-    return getUserPreferences(userId);
+    const existing = await prisma.notificationPreference.findUnique({ where: { userId } });
+
+    if (existing) {
+      return toPreferences(existing);
+    }
+
+    const created = await prisma.notificationPreference.create({
+      data: { userId },
+    });
+
+    return toPreferences(created);
   },
 
   /**
-   * Get all notifications for a user (delivery tracking).
+   * Get paginated notifications for a user (delivery tracking).
    */
-  async getNotifications(userId: string): Promise<Notification[]> {
-    return notificationStore.filter((n) => n.userId === userId);
+  async getNotifications(
+    userId: string,
+    options: { page?: number; limit?: number; unreadOnly?: boolean } = {}
+  ): Promise<{
+    notifications: Notification[];
+    total: number;
+    page: number;
+    limit: number;
+    hasMore: boolean;
+  }> {
+    const page = options.page ?? 1;
+    const limit = options.limit ?? 20;
+
+    const where = {
+      userId,
+      ...(options.unreadOnly === true ? { readAt: null } : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      prisma.notification.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.notification.count({ where }),
+    ]);
+
+    return {
+      notifications: rows.map(toNotification),
+      total,
+      page,
+      limit,
+      hasMore: page * limit < total,
+    };
+  },
+
+  /**
+   * Mark the given notifications as read for a user.
+   */
+  async markRead(userId: string, ids: string[]): Promise<number> {
+    if (!ids || ids.length === 0) return 0;
+
+    const result = await prisma.notification.updateMany({
+      where: { userId, id: { in: ids } },
+      data: { readAt: new Date() },
+    });
+
+    return result.count;
+  },
+
+  /**
+   * Register (or refresh) a device web-push subscription for a user.
+   */
+  async registerPushSubscription(
+    userId: string,
+    subscription: PushSubscription
+  ): Promise<PushSubscription> {
+    const { endpoint, keys, userAgent } = subscription;
+
+    if (!endpoint || !keys?.p256dh || !keys?.auth) {
+      throw new Error('Invalid push subscription');
+    }
+
+    await prisma.pushSubscription.upsert({
+      where: { userId_endpoint: { userId, endpoint } },
+      update: {
+        p256dh: keys.p256dh,
+        auth: keys.auth,
+        userAgent: userAgent ?? null,
+      },
+      create: {
+        userId,
+        endpoint,
+        p256dh: keys.p256dh,
+        auth: keys.auth,
+        userAgent: userAgent ?? null,
+      },
+    });
+
+    return { endpoint, keys, userAgent };
+  },
+
+  /**
+   * Remove a device web-push subscription for a user.
+   */
+  async deletePushSubscription(userId: string, id: string): Promise<boolean> {
+    const result = await prisma.pushSubscription.deleteMany({
+      where: { id, userId },
+    });
+
+    return result.count > 0;
+  },
+
+  /**
+   * List registered push subscriptions for a user.
+   */
+  async getPushSubscriptions(userId: string): Promise<PushSubscription[]> {
+    const rows = await prisma.pushSubscription.findMany({ where: { userId } });
+
+    return rows.map((row) => ({
+      id: row.id,
+      endpoint: row.endpoint,
+      keys: { p256dh: row.p256dh, auth: row.auth },
+      userAgent: row.userAgent ?? undefined,
+    }));
   },
 
   /**
@@ -374,8 +559,4 @@ export const NotificationService = {
   getTemplate(id: string): NotificationTemplate | undefined {
     return TEMPLATES[id];
   },
-
-  // Expose for testing purposes
-  _notificationStore: notificationStore,
-  _preferencesStore: preferencesStore,
 };

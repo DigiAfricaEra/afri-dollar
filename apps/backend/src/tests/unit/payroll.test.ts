@@ -2,6 +2,7 @@
 import { Account, Keypair } from '@stellar/stellar-sdk';
 
 import prisma from '../../config/database';
+import { NotificationService } from '../../services/notification.service';
 import { PayrollService } from '../../services/payroll.service';
 import { encrypt } from '../../utils/crypto';
 
@@ -35,6 +36,10 @@ jest.mock('../../services/webhook.service', () => ({
   WebhookService: {
     emitEvent: jest.fn(),
   },
+}));
+
+jest.mock('../../services/notification.service', () => ({
+  NotificationService: { notify: jest.fn().mockResolvedValue(undefined) },
 }));
 
 jest.mock('../../config/database', () => ({
@@ -665,6 +670,11 @@ describe('PayrollService', () => {
       expect(result.successful).toBe(2);
       expect(result.failed).toBe(0);
       expect(result.items[0].status).toBe('completed');
+      expect(NotificationService.notify).toHaveBeenCalledWith(
+        mockUserId,
+        'payroll-processed',
+        expect.objectContaining({ batchName: 'June Payroll' })
+      );
     });
 
     it('should fallback to individual transactions if the batch submission fails', async () => {
