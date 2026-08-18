@@ -69,9 +69,11 @@ fn multiplication_overflows() {
 
 #[test]
 fn negative_numerator_overflows() {
-    // i128::MIN * -1 overflows (i128::MIN is -2^127, * -1 = 2^127 > i128::MAX)
-    let min = i128::MIN;
-    assert_eq!(checked_mul_div(1, min, 1), Err(Error::Overflow));
+    // i128::MIN * -1 overflows: -2^127 * -1 = 2^127 > i128::MAX
+    assert_eq!(
+        checked_mul_div(i128::MIN, -1, 1),
+        Err(Error::Overflow)
+    );
 }
 
 #[test]
