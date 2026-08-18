@@ -1,32 +1,47 @@
 #![no_std]
 //! Shared building blocks for AfriDollar Soroban contracts.
+//!
+//! This crate provides the source of truth for cross-cutting contract
+//! concerns: error definitions, event helpers, arithmetic utilities,
+//! authentication patterns, and TTL management.
+//!
+//! # Discriminant stability
+//!
+//! The [`Error`] enum uses explicit `repr(u32)` discriminants. Existing
+//! discriminants are **never** reordered. New variants are always appended.
 
-use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env};
+mod address;
+mod auth;
+mod errors;
+mod events;
+mod math;
+mod ttl;
 
-pub const DAY_IN_LEDGERS: u32 = 17_280;
-pub const INSTANCE_BUMP_AMOUNT: u32 = 7 * DAY_IN_LEDGERS;
-pub const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
+// Re-export address validation.
+pub use address::address_valid;
 
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum Error {
-    AlreadyInitialized = 1,
-    NotInitialized = 2,
-    Unauthorized = 3,
-    UpgradeAlreadyPending = 4,
-    NoPendingUpgrade = 5,
-    UpgradeTimelockNotElapsed = 6,
-    InvalidVersion = 7,
-}
+// Re-export auth helpers.
+pub use auth::require_auth_or_admin;
 
-pub fn extend_instance_ttl(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-}
+// Re-export the expanded Error enum.
+pub use errors::Error;
+
+// Re-export event helpers.
+pub use events::{publish_admin_action, publish_transfer};
+
+// Re-export math helpers.
+pub use math::checked_mul_div;
+
+// Re-export TTL helpers and constants (including the original API).
+pub use ttl::{
+    bump_instance_and_persistent, extend_instance_ttl, DAY_IN_LEDGERS, INSTANCE_BUMP_AMOUNT,
+    INSTANCE_LIFETIME_THRESHOLD,
+};
 
 // --- Upgradeable Contract Types ----------------------------------------
+// Preserved from the original lib.rs for backwards compatibility.
+
+use soroban_sdk::{contracttype, Address, BytesN, Env};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -251,7 +266,7 @@ pub fn migrate_storage(_env: &Env, _old_version: ContractVersion, _new_version: 
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::Env;
+    use soroban_sdk::testutils::Address;
 
     #[test]
     fn extend_instance_ttl_runs_inside_contract_context() {
@@ -261,6 +276,51 @@ mod test {
             env.storage().instance().set(&(), &0u32);
             extend_instance_ttl(&env);
         });
+    }
+
+    #[test]
+    fn error_discriminants_are_stable() {
+        // Existing variants — must never change.
+        assert_eq!(Error::AlreadyInitialized as u32, 1);
+        assert_eq!(Error::NotInitialized as u32, 2);
+        assert_eq!(Error::Unauthorized as u32, 3);
+        assert_eq!(Error::UpgradeAlreadyPending as u32, 4);
+        assert_eq!(Error::NoPendingUpgrade as u32, 5);
+        assert_eq!(Error::UpgradeTimelockNotElapsed as u32, 6);
+        assert_eq!(Error::InvalidVersion as u32, 7);
+        // Newly appended variants.
+        assert_eq!(Error::InvalidAmount as u32, 8);
+        assert_eq!(Error::Overflow as u32, 9);
+        assert_eq!(Error::AssetNotFound as u32, 10);
+        assert_eq!(Error::InsufficientBalance as u32, 11);
+        assert_eq!(Error::Expired as u32, 12);
+    }
+
+    #[test]
+    fn checked_mul_div_basic() {
+        // 1000 * 50 / 100 = 500
+        assert_eq!(checked_mul_div(1000, 50, 100), Ok(500));
+    }
+
+    #[test]
+    fn checked_mul_div_zero_denominator() {
+        assert_eq!(checked_mul_div(1000, 1, 0), Err(Error::Overflow));
+    }
+
+    #[test]
+    fn checked_mul_div_overflow() {
+        // i128::MAX * 2 overflows
+        let max = i128::MAX;
+        assert_eq!(checked_mul_div(max, 2, 1), Err(Error::Overflow));
+    }
+
+    #[test]
+    fn require_auth_or_admin_bypasses_auth_for_admin() {
+        let env = Env::default();
+        let admin = soroban_sdk::Address::generate(&env);
+        // When caller == admin, no auth is required — should succeed.
+        let result = require_auth_or_admin(&env, &admin, Some(&admin));
+        assert_eq!(result, Ok(()));
     }
 
     use soroban_sdk::contract;

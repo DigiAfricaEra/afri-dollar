@@ -2,8 +2,8 @@
 
 use afri_contract_shared::extend_instance_ttl;
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, Address, Env,
-    Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, token::TokenClient,
+    Address, Env, MuxedAddress, Symbol, Vec,
 };
 
 #[contracttype]
@@ -56,6 +56,8 @@ pub enum TreasuryError {
     InsufficientApprovals = 12,
     AssetNotConfigured = 13,
     NoEmergencyApprovers = 14,
+    InsufficientContractBalance = 15,
+    DepositAmountZero = 16,
 }
 
 #[contractevent(topics = ["timelock_config"])]
@@ -77,6 +79,14 @@ pub struct WithdrawalEvent {
     pub asset: Address,
     pub amount: i128,
     pub to: Address,
+}
+
+#[contractevent(topics = ["deposit"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DepositEvent {
+    pub depositor: Address,
+    pub asset: Address,
+    pub amount: i128,
 }
 
 #[contract]
@@ -205,6 +215,41 @@ impl TreasuryContract {
             .unwrap_or(0)
     }
 
+    pub fn deposit(
+        env: Env,
+        depositor: Address,
+        asset: Address,
+        amount: i128,
+    ) -> Result<(), TreasuryError> {
+        env.storage()
+            .instance()
+            .get::<_, Address>(&DataKey::Admin)
+            .ok_or(TreasuryError::NotInitialized)?;
+
+        depositor.require_auth();
+
+        if amount <= 0 {
+            return Err(TreasuryError::DepositAmountZero);
+        }
+
+        TokenClient::new(&env, &asset).transfer(
+            &depositor,
+            &MuxedAddress::from(env.current_contract_address()),
+            &amount,
+        );
+
+        extend_instance_ttl(&env);
+
+        DepositEvent {
+            depositor,
+            asset,
+            amount,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     pub fn request_withdrawal(
         env: Env,
         requester: Address,
@@ -297,6 +342,18 @@ impl TreasuryContract {
         if now < request.unlock_at {
             return Err(TreasuryError::TimeLockNotElapsed);
         }
+
+        let contract_balance = TokenClient::new(&env, &request.asset)
+            .balance(&env.current_contract_address());
+        if contract_balance < request.amount {
+            return Err(TreasuryError::InsufficientContractBalance);
+        }
+
+        TokenClient::new(&env, &request.asset).transfer(
+            &env.current_contract_address(),
+            &MuxedAddress::from(request.to.clone()),
+            &request.amount,
+        );
 
         request.executed = true;
         env.storage()
@@ -406,6 +463,19 @@ impl TreasuryContract {
         if request.cancelled {
             return Err(TreasuryError::RequestAlreadyCancelled);
         }
+
+        // Check contract balance
+        let contract_balance = TokenClient::new(&env, &request.asset)
+            .balance(&env.current_contract_address());
+        if contract_balance < request.amount {
+            return Err(TreasuryError::InsufficientContractBalance);
+        }
+
+        TokenClient::new(&env, &request.asset).transfer(
+            &env.current_contract_address(),
+            &MuxedAddress::from(request.to.clone()),
+            &request.amount,
+        );
 
         request.executed = true;
         env.storage()
