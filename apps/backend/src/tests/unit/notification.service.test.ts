@@ -1,8 +1,16 @@
 /* eslint-disable */
+import { lookup as dnsLookup } from 'node:dns';
 import { lookup } from 'node:dns/promises';
 
 import prisma from '../../config/database';
-import { NotificationService } from '../../services/notification.service';
+import {
+  createPublicEndpointAgent,
+  NotificationService,
+} from '../../services/notification.service';
+
+jest.mock('node:dns', () => ({
+  lookup: jest.fn(),
+}));
 
 jest.mock('node:dns/promises', () => ({
   lookup: jest.fn().mockResolvedValue([{ address: '8.8.8.8', family: 4 }]),
@@ -64,6 +72,7 @@ const mockPushSubFindMany = prisma.pushSubscription.findMany as jest.Mock;
 const mockPushSubUpsert = prisma.pushSubscription.upsert as jest.Mock;
 const mockPushSubDeleteMany = prisma.pushSubscription.deleteMany as jest.Mock;
 const mockLookup = lookup as jest.Mock;
+const mockDnsLookup = dnsLookup as unknown as jest.Mock;
 
 function prefsRow(
   userId: string,
@@ -288,11 +297,69 @@ describe('NotificationService', () => {
         'public-key',
         'private-key'
       );
-      expect(webpush.sendNotification).toHaveBeenCalledWith(mockSubscription, expect.any(String));
+      expect(webpush.sendNotification).toHaveBeenCalledWith(
+        mockSubscription,
+        expect.any(String),
+        expect.objectContaining({ agent: expect.any(Object) })
+      );
 
       delete process.env.VAPID_SUBJECT;
       delete process.env.VAPID_PUBLIC_KEY;
       delete process.env.VAPID_PRIVATE_KEY;
+    });
+
+    it('should reject a push notification to a multicast endpoint (225.0.0.1)', async () => {
+      process.env.VAPID_SUBJECT = 'mailto:test@test.com';
+      process.env.VAPID_PUBLIC_KEY = 'public-key';
+      process.env.VAPID_PRIVATE_KEY = 'private-key';
+
+      await expect(
+        NotificationService.sendPush(
+          {
+            endpoint: 'https://225.0.0.1/send',
+            keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+          },
+          { title: 'Test' }
+        )
+      ).rejects.toThrow('Invalid push subscription');
+
+      delete process.env.VAPID_SUBJECT;
+      delete process.env.VAPID_PUBLIC_KEY;
+      delete process.env.VAPID_PRIVATE_KEY;
+    });
+
+    it('should reject DNS rebinding to an internal address at connect time', (done) => {
+      mockDnsLookup.mockImplementation(
+        (
+          _hostname: string,
+          _options: { all?: boolean },
+          callback: (
+            err: Error | null,
+            addresses?: Array<{ address: string; family: number }>
+          ) => void
+        ) => {
+          callback(null, [{ address: '10.0.0.5', family: 4 }]);
+        }
+      );
+
+      const agent = createPublicEndpointAgent();
+      const agentLookup = (
+        agent as unknown as {
+          options: {
+            lookup: (
+              hostname: string,
+              options: { all?: boolean },
+              callback: (err: Error | null, ...rest: unknown[]) => void
+            ) => void;
+          };
+        }
+      ).options.lookup;
+
+      agentLookup('push.internal.test', { all: true }, (err) => {
+        expect(err).toBeDefined();
+        expect(err?.message).toBe('Invalid push subscription');
+        done();
+      });
     });
   });
 
@@ -513,6 +580,81 @@ describe('NotificationService', () => {
       expect(mockNotificationCreate).toHaveBeenCalledTimes(2); // email + sms
     });
 
+    it('should mark push as sent when at least one subscription delivers', async () => {
+      process.env.VAPID_SUBJECT = 'mailto:test@test.com';
+      process.env.VAPID_PUBLIC_KEY = 'public-key';
+      process.env.VAPID_PRIVATE_KEY = 'private-key';
+
+      const webpush = require('web-push');
+      (webpush.sendNotification as jest.Mock)
+        .mockRejectedValueOnce(new Error('subscription 1 failed'))
+        .mockResolvedValueOnce({});
+
+      mockPreferenceUpsert.mockResolvedValue(
+        prefsRow('user-pushmix', { email: false, sms: false })
+      );
+      mockPushSubFindMany.mockResolvedValue([
+        {
+          id: 'sub-1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/a',
+          p256dh: 'p256dh-a',
+          auth: 'auth-a',
+        },
+        {
+          id: 'sub-2',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/b',
+          p256dh: 'p256dh-b',
+          auth: 'auth-b',
+        },
+      ]);
+
+      await NotificationService.notify('user-pushmix', 'kyc-approved', { firstName: 'Alice' });
+
+      expect(mockNotificationCreate).toHaveBeenCalledTimes(1);
+      expect(mockNotificationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'sent' }),
+        })
+      );
+
+      delete process.env.VAPID_SUBJECT;
+      delete process.env.VAPID_PUBLIC_KEY;
+      delete process.env.VAPID_PRIVATE_KEY;
+    });
+
+    it('should mark push as failed when every subscription delivery fails', async () => {
+      process.env.VAPID_SUBJECT = 'mailto:test@test.com';
+      process.env.VAPID_PUBLIC_KEY = 'public-key';
+      process.env.VAPID_PRIVATE_KEY = 'private-key';
+
+      const webpush = require('web-push');
+      (webpush.sendNotification as jest.Mock).mockRejectedValue(new Error('all failed'));
+
+      mockPreferenceUpsert.mockResolvedValue(
+        prefsRow('user-pushfail', { email: false, sms: false })
+      );
+      mockPushSubFindMany.mockResolvedValue([
+        {
+          id: 'sub-1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/a',
+          p256dh: 'p256dh-a',
+          auth: 'auth-a',
+        },
+      ]);
+
+      await NotificationService.notify('user-pushfail', 'kyc-approved', { firstName: 'Alice' });
+
+      expect(mockNotificationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'failed' }),
+        })
+      );
+
+      delete process.env.VAPID_SUBJECT;
+      delete process.env.VAPID_PUBLIC_KEY;
+      delete process.env.VAPID_PRIVATE_KEY;
+    });
+
     it('should return early for an unknown notification type', async () => {
       await expect(
         NotificationService.notify('user-600', 'unknown-type' as any, {})
@@ -660,6 +802,16 @@ describe('NotificationService', () => {
       await expect(
         NotificationService.registerPushSubscription('user-1', {
           endpoint: 'http://fcm.googleapis.com/send',
+          keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+        })
+      ).rejects.toThrow('Invalid push subscription');
+      expect(mockPushSubUpsert).not.toHaveBeenCalled();
+    });
+
+    it('should reject a push subscription with a multicast endpoint (225.0.0.1)', async () => {
+      await expect(
+        NotificationService.registerPushSubscription('user-1', {
+          endpoint: 'https://225.0.0.1/send',
           keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
         })
       ).rejects.toThrow('Invalid push subscription');

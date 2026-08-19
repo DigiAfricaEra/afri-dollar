@@ -1,4 +1,7 @@
+import { lookup as dnsLookup } from 'node:dns';
+import type { LookupAddress, LookupOptions } from 'node:dns';
 import { lookup } from 'node:dns/promises';
+import https from 'node:https';
 import { isIP } from 'node:net';
 
 import type { Prisma } from '@afri-dollar/database';
@@ -102,7 +105,7 @@ function isPrivateIPv4(ip: string): boolean {
   if (a === 192 && b === 168) return true; // 192.168.0.0/16 private
   if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 shared
   if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmark
-  if (a === 224) return true; // 224.0.0.0/4 multicast
+  if (a >= 224 && a <= 239) return true; // 224.0.0.0/4 multicast
   if (a >= 240) return true; // 240.0.0.0/4 reserved + broadcast
   return false;
 }
@@ -164,6 +167,82 @@ async function assertPublicEndpoint(endpoint: string): Promise<void> {
   if (addresses.length === 0 || addresses.some(({ address }) => isPrivateAddress(address))) {
     throw new Error('Invalid push subscription');
   }
+}
+
+/**
+ * Validates the resolved addresses for an outbound push connection against the
+ * public-endpoint rules. Rejects loopback, private, link-local, reserved,
+ * multicast, or otherwise non-public destinations.
+ */
+function validateResolvedAddresses(addresses: LookupAddress[]): void {
+  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateAddress(address))) {
+    throw new Error('Invalid push subscription');
+  }
+}
+
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address?: string | LookupAddress[],
+  family?: number
+) => void;
+
+type PublicDnsLookup = (
+  hostname: string,
+  options: LookupOptions,
+  callback: (err: NodeJS.ErrnoException | null, addresses?: LookupAddress[]) => void
+) => void;
+
+/**
+ * Lookup callback bound to the outbound HTTPS connection. Resolves the
+ * hostname, re-validates every address against the public-endpoint rules, and
+ * rejects the connection if any address is non-public. This closes the
+ * DNS-rebinding (TOCTOU) window between the pre-check and the actual connect.
+ */
+function publicLookup(
+  lookupFn: PublicDnsLookup,
+  hostname: string,
+  options: LookupOptions,
+  callback: LookupCallback
+): void {
+  lookupFn(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) {
+      callback(err);
+      return;
+    }
+
+    const list = addresses ?? [];
+
+    try {
+      validateResolvedAddresses(list);
+    } catch (validationErr) {
+      callback(validationErr as NodeJS.ErrnoException);
+      return;
+    }
+
+    if (options.all === true) {
+      callback(null, list);
+    } else if (list[0]) {
+      callback(null, list[0].address, list[0].family);
+    } else {
+      callback(new Error('Invalid push subscription'));
+    }
+  });
+}
+
+/**
+ * Builds an HTTPS agent whose connection-time lookup validates every resolved
+ * address so push traffic can never reach an internal network.
+ */
+export function createPublicEndpointAgent(): https.Agent {
+  const lookup = ((hostname: string, options: LookupOptions, callback: LookupCallback) =>
+    publicLookup(
+      dnsLookup as unknown as PublicDnsLookup,
+      hostname,
+      options,
+      callback
+    )) as https.AgentOptions['lookup'];
+
+  return new https.Agent({ lookup });
 }
 
 function escapeHtml(str: string): string {
@@ -294,7 +373,11 @@ async function deliverPush(
 
   await assertPublicEndpoint(subscription.endpoint);
 
-  await withTimeout(webpush.sendNotification(subscription, JSON.stringify(payload)));
+  await withTimeout(
+    webpush.sendNotification(subscription, JSON.stringify(payload), {
+      agent: createPublicEndpointAgent(),
+    })
+  );
 
   return true;
 }
@@ -336,7 +419,11 @@ async function getTwilioClient(): Promise<{
 }
 
 async function getWebPushClient(): Promise<{
-  sendNotification: (sub: unknown, payload: string) => Promise<unknown>;
+  sendNotification: (
+    sub: unknown,
+    payload: string,
+    options?: Record<string, unknown>
+  ) => Promise<unknown>;
   setVapidDetails: (s: string, pub: string, priv: string) => void;
 } | null> {
   try {
@@ -452,12 +539,14 @@ export const NotificationService = {
         } else if (channel === 'sms' && phone) {
           delivered = await deliverSMS(phone, body);
         } else if (channel === 'push' && pushSubscriptions.length > 0) {
-          const results = await Promise.all(
+          const results = await Promise.allSettled(
             pushSubscriptions.map((sub) =>
               deliverPush(toWebPushSubscription(sub), { title: subject, body, type })
             )
           );
-          delivered = results.some((result) => result);
+          delivered = results.some(
+            (result) => result.status === 'fulfilled' && result.value === true
+          );
         }
 
         await prisma.notification.update({
