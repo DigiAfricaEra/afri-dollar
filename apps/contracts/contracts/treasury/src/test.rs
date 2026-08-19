@@ -398,7 +398,7 @@ fn emergency_override_executes_before_unlock_succeeds() {
     let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
     let to = Address::generate(&env);
     env.mock_all_auths();
-    let (approver1, approver2, _) = setup_emergency(&env, &client);
+    let (_approver1, _approver2, _) = setup_emergency(&env, &client);
 
     let id = client.request_withdrawal(&requester, &to, &asset, &1000);
 
@@ -548,7 +548,7 @@ fn emergency_override_already_executed_fails_test() {
     let (env, _contract_id, client, _admin, requester, _approver, asset) = setup_with_timelock();
     let to = Address::generate(&env);
     env.mock_all_auths();
-    let approver1 = setup_emergency_single(&env, &client);
+    let _approver1 = setup_emergency_single(&env, &client);
 
     let id = client.request_withdrawal(&requester, &to, &asset, &1000);
 
