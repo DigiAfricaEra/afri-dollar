@@ -10,6 +10,8 @@ import {
 } from '@stellar/stellar-sdk';
 
 import prisma from '../config/database';
+import { env } from '../config/env';
+import { ComplianceError } from '../types/compliance.types';
 import type {
   CreateCrossBorderPaymentOptions,
   PaymentStatus,
@@ -109,6 +111,58 @@ async function assertPaymentNotComplianceBlocked(
 
 const SANCTIONED_COUNTRIES = ['KP', 'IR', 'SY', 'CU'];
 
+/**
+ * KYC gating helper. Checks whether the user's KYC level satisfies the
+ * requirements for the given payment amount. Throws ComplianceError on failure.
+ * Payments below $1,000 always succeed regardless of KYC status.
+ */
+async function requireKYC(userId: string, amount: string): Promise<void> {
+  const amountNum = parseFloat(amount);
+
+  // Below the threshold — no KYC required
+  if (env.KYC_REQUIRED_THRESHOLD_USD > 0 && amountNum < env.KYC_REQUIRED_THRESHOLD_USD) {
+    return;
+  }
+
+  // No threshold configured — KYC gating disabled
+  if (!env.KYC_REQUIRED_THRESHOLD_USD) {
+    return;
+  }
+
+  const latestRecord = await prisma.kYCRecord.findFirst({
+    where: { userId },
+    orderBy: { updatedAt: 'desc' },
+  });
+
+  if (latestRecord?.status !== 'approved') {
+    throw new ComplianceError(
+      'KYC verification required for payments >= $' + env.KYC_REQUIRED_THRESHOLD_USD,
+      'KYC_REQUIRED',
+      403
+    );
+  }
+
+  // Enhanced due diligence required for payments >= $10,000
+  if (amountNum >= 10000) {
+    if (latestRecord.level !== 'ENHANCED') {
+      throw new ComplianceError(
+        'Enhanced due diligence (KYC Level ENHANCED) required for payments >= $10,000',
+        'ENHANCED_KYC_REQUIRED',
+        403
+      );
+    }
+  }
+
+  // Standard level required for payments >= $1,000 (when threshold is exactly $1,000)
+  if (amountNum >= 1000 && latestRecord.level === 'BASIC') {
+    throw new ComplianceError(
+      'Standard KYC verification (Level 2) required for payments >= $1,000',
+      'KYC_LEVEL_2_REQUIRED',
+      403
+    );
+  }
+}
+
 async function performSanctionsScreening(
   beneficiaryCountry?: string
 ): Promise<'passed' | 'failed'> {
@@ -202,6 +256,9 @@ export const PaymentService = {
     if (wallet.userId !== userId) {
       throw new Error('Wallet does not belong to user');
     }
+
+    // KYC gating — checks threshold-based requirements
+    await requireKYC(userId, options.amount);
 
     const complianceChecks = await performComplianceChecks(
       userId,
