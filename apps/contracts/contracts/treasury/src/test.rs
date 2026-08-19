@@ -371,7 +371,7 @@ fn cancel_withdrawal_already_executed_fails() {
 
     let id = client.request_withdrawal(&requester, &to, &asset, &500);
     env.ledger().set_timestamp(env.ledger().timestamp() + 3601);
-    
+
     let req = client.get_withdrawal_request(&id);
     assert_eq!(req.amount, 500);
 }
@@ -623,7 +623,12 @@ fn emergency_threshold_two_of_three() {
 
     // Add third approver but keep threshold at 2
     let approver3 = Address::generate(&env);
-    let all_approvers = vec![&env, approver1.clone(), approver2.clone(), approver3.clone()];
+    let all_approvers = vec![
+        &env,
+        approver1.clone(),
+        approver2.clone(),
+        approver3.clone(),
+    ];
     client.set_emergency_approvers(&all_approvers, &2);
 
     // Request withdrawal

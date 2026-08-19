@@ -2,8 +2,8 @@
 
 use afri_contract_shared::extend_instance_ttl;
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short, token::TokenClient,
-    Address, Env, MuxedAddress, Symbol, Vec,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short,
+    token::TokenClient, Address, Env, MuxedAddress, Symbol, Vec,
 };
 
 #[contracttype]
@@ -343,8 +343,8 @@ impl TreasuryContract {
             return Err(TreasuryError::TimeLockNotElapsed);
         }
 
-        let contract_balance = TokenClient::new(&env, &request.asset)
-            .balance(&env.current_contract_address());
+        let contract_balance =
+            TokenClient::new(&env, &request.asset).balance(&env.current_contract_address());
         if contract_balance < request.amount {
             return Err(TreasuryError::InsufficientContractBalance);
         }
@@ -465,8 +465,8 @@ impl TreasuryContract {
         }
 
         // Check contract balance
-        let contract_balance = TokenClient::new(&env, &request.asset)
-            .balance(&env.current_contract_address());
+        let contract_balance =
+            TokenClient::new(&env, &request.asset).balance(&env.current_contract_address());
         if contract_balance < request.amount {
             return Err(TreasuryError::InsufficientContractBalance);
         }
