@@ -234,7 +234,7 @@ impl TreasuryContract {
 
         TokenClient::new(&env, &asset).transfer(
             &depositor,
-            &MuxedAddress::from(env.current_contract_address()),
+            MuxedAddress::from(env.current_contract_address()),
             &amount,
         );
 
@@ -351,7 +351,7 @@ impl TreasuryContract {
 
         TokenClient::new(&env, &request.asset).transfer(
             &env.current_contract_address(),
-            &MuxedAddress::from(request.to.clone()),
+            MuxedAddress::from(request.to.clone()),
             &request.amount,
         );
 
@@ -473,7 +473,7 @@ impl TreasuryContract {
 
         TokenClient::new(&env, &request.asset).transfer(
             &env.current_contract_address(),
-            &MuxedAddress::from(request.to.clone()),
+            MuxedAddress::from(request.to.clone()),
             &request.amount,
         );
 
