@@ -402,3 +402,6 @@ impl PayrollContract {
         read_batch(&env, batch_id).ok_or(Error::BatchNotFound)
     }
 }
+
+#[cfg(test)]
+mod test;
