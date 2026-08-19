@@ -181,8 +181,6 @@ export const AuthService = {
 
     // Notify the user of a new login session (fire-and-forget; never blocks auth)
     void NotificationService.notify(user.id, 'security-alert', {
-      email: user.email,
-      phone: user.phoneNumber ?? undefined,
       activity: `New login${deviceInfo ? ` from ${deviceInfo}` : ''}`,
     }).catch((err: unknown) => {
       console.error('[AuthService] Failed to send login notification:', err);
@@ -256,8 +254,6 @@ export const AuthService = {
 
     // Notify the user of the refreshed session (fire-and-forget; never blocks auth)
     void NotificationService.notify(tokenRecord.userId, 'security-alert', {
-      email: tokenRecord.user.email,
-      phone: tokenRecord.user.phoneNumber ?? undefined,
       activity: 'Session refreshed from a known device',
     }).catch((err: unknown) => {
       console.error('[AuthService] Failed to send refresh notification:', err);

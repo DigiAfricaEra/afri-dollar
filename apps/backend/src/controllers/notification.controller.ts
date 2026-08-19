@@ -2,7 +2,7 @@ import type { Response } from 'express';
 import { z } from 'zod';
 
 import type { AuthRequest } from '../middleware/auth.middleware';
-import { NotificationService } from '../services/notification.service';
+import { MAX_LIMIT, MAX_PAGE, NotificationService } from '../services/notification.service';
 import { AppError } from '../types';
 
 function handleError(res: Response, error: unknown): void {
@@ -42,6 +42,13 @@ function handleError(res: Response, error: unknown): void {
   });
 }
 
+function parsePositiveInteger(value: string, max: number): number | undefined {
+  if (!/^\d+$/.test(value)) return undefined;
+  const num = Number(value);
+  if (num < 1 || num > max) return undefined;
+  return num;
+}
+
 function requireUser(req: AuthRequest, res: Response): string | null {
   if (!req.user) {
     res.status(401).json({
@@ -63,9 +70,32 @@ export const NotificationController = {
       if (!userId) return;
 
       const { page, limit, unreadOnly } = req.query;
+
+      const pageParam = typeof page === 'string' ? page : undefined;
+      const limitParam = typeof limit === 'string' ? limit : undefined;
+
+      const parsedPage =
+        pageParam === undefined ? undefined : parsePositiveInteger(pageParam, MAX_PAGE);
+      const parsedLimit =
+        limitParam === undefined ? undefined : parsePositiveInteger(limitParam, MAX_LIMIT);
+
+      if (
+        (pageParam !== undefined && parsedPage === undefined) ||
+        (limitParam !== undefined && parsedLimit === undefined)
+      ) {
+        res.status(400).json({
+          success: false,
+          error: 'Validation error',
+          details: [
+            { message: 'page and limit must be positive integers within the allowed bounds' },
+          ],
+        });
+        return;
+      }
+
       const result = await NotificationService.getNotifications(userId, {
-        page: typeof page === 'string' ? Number(page) : undefined,
-        limit: typeof limit === 'string' ? Number(limit) : undefined,
+        page: parsedPage,
+        limit: parsedLimit,
         unreadOnly: unreadOnly === 'true',
       });
 

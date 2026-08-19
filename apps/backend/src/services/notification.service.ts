@@ -1,3 +1,6 @@
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+
 import type { Prisma } from '@afri-dollar/database';
 
 import prisma from '../config/database';
@@ -8,6 +11,11 @@ import type {
   PushSubscription,
   NotificationType,
 } from '../types/notification.types';
+
+export const DEFAULT_PAGE = 1;
+export const DEFAULT_LIMIT = 20;
+export const MAX_PAGE = 1000;
+export const MAX_LIMIT = 100;
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -78,6 +86,84 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number = PROVIDER_TIMEOU
         reject(err instanceof Error ? err : new Error(String(err)));
       });
   });
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
+    return true;
+  }
+  const [a, b] = parts;
+  if (a === 0) return true; // 0.0.0.0/8 "this" network
+  if (a === 10) return true; // 10.0.0.0/8 private
+  if (a === 127) return true; // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 private
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16 private
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 shared
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmark
+  if (a === 224) return true; // 224.0.0.0/4 multicast
+  if (a >= 240) return true; // 240.0.0.0/4 reserved + broadcast
+  return false;
+}
+
+/**
+ * Returns true for loopback, private, link-local, reserved, multicast, or
+ * otherwise non-public destinations so we never push to internal networks.
+ */
+function isPrivateAddress(ip: string): boolean {
+  if (ip.includes(':')) {
+    const mapped = ip.toLowerCase().match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) {
+      return isPrivateIPv4(mapped[1]);
+    }
+    const lower = ip.toLowerCase();
+    if (lower === '::' || lower === '::1') return true; // unspecified + loopback
+    if (/^f[c-d]/.test(lower)) return true; // fc00::/7 unique local
+    if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
+    if (lower.startsWith('ff')) return true; // ff00::/8 multicast
+    if (lower.startsWith('2001:db8')) return true; // documentation range
+    return false;
+  }
+  return isPrivateIPv4(ip);
+}
+
+/**
+ * Resolve the push endpoint hostname and reject loopback, private, link-local,
+ * reserved, or otherwise non-public destinations. Only public HTTPS endpoints
+ * are allowed. This guards against SSRF via a stored/malicious endpoint.
+ */
+async function assertPublicEndpoint(endpoint: string): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new Error('Invalid push subscription');
+  }
+
+  if (url.protocol !== 'https:') {
+    throw new Error('Invalid push subscription');
+  }
+
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+
+  if (isIP(hostname) !== 0) {
+    if (isPrivateAddress(hostname)) {
+      throw new Error('Invalid push subscription');
+    }
+    return;
+  }
+
+  let addresses: Array<{ address: string; family: number }>;
+  try {
+    addresses = await lookup(hostname, { all: true });
+  } catch {
+    throw new Error('Invalid push subscription');
+  }
+
+  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateAddress(address))) {
+    throw new Error('Invalid push subscription');
+  }
 }
 
 function escapeHtml(str: string): string {
@@ -158,11 +244,11 @@ function toWebPushSubscription(row: {
 // Channel-level senders (thin wrappers — real integration injected via env)
 // ---------------------------------------------------------------------------
 
-async function deliverEmail(to: string, subject: string, body: string): Promise<void> {
+async function deliverEmail(to: string, subject: string, body: string): Promise<boolean> {
   const sgMail = await getEmailClient();
   if (!sgMail) {
     console.warn('[NotificationService] SendGrid not configured – skipping email delivery');
-    return;
+    return false;
   }
 
   await withTimeout(
@@ -174,13 +260,15 @@ async function deliverEmail(to: string, subject: string, body: string): Promise<
       html: `<p>${escapeHtml(body).replace(/\n/g, '<br/>')}</p>`,
     })
   );
+
+  return true;
 }
 
-async function deliverSMS(to: string, message: string): Promise<void> {
+async function deliverSMS(to: string, message: string): Promise<boolean> {
   const twilioClient = await getTwilioClient();
   if (!twilioClient) {
     console.warn('[NotificationService] Twilio not configured – skipping SMS delivery');
-    return;
+    return false;
   }
 
   await withTimeout(
@@ -190,19 +278,25 @@ async function deliverSMS(to: string, message: string): Promise<void> {
       to,
     })
   );
+
+  return true;
 }
 
 async function deliverPush(
   subscription: PushSubscription,
   payload: Record<string, unknown>
-): Promise<void> {
+): Promise<boolean> {
   const webpush = await getWebPushClient();
   if (!webpush) {
     console.warn('[NotificationService] web-push not configured – skipping push notification');
-    return;
+    return false;
   }
 
+  await assertPublicEndpoint(subscription.endpoint);
+
   await withTimeout(webpush.sendNotification(subscription, JSON.stringify(payload)));
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,35 +445,25 @@ export const NotificationService = {
       });
 
       try {
+        let delivered = false;
+
         if (channel === 'email' && email) {
-          await deliverEmail(email, subject, body);
-          await prisma.notification.update({
-            where: { id: notif.id },
-            data: { status: 'sent', sentAt: new Date() },
-          });
+          delivered = await deliverEmail(email, subject, body);
         } else if (channel === 'sms' && phone) {
-          await deliverSMS(phone, body);
-          await prisma.notification.update({
-            where: { id: notif.id },
-            data: { status: 'sent', sentAt: new Date() },
-          });
+          delivered = await deliverSMS(phone, body);
         } else if (channel === 'push' && pushSubscriptions.length > 0) {
-          await Promise.all(
+          const results = await Promise.all(
             pushSubscriptions.map((sub) =>
               deliverPush(toWebPushSubscription(sub), { title: subject, body, type })
             )
           );
-          await prisma.notification.update({
-            where: { id: notif.id },
-            data: { status: 'sent', sentAt: new Date() },
-          });
-        } else {
-          // Recipient info not available for this channel; mark as failed
-          await prisma.notification.update({
-            where: { id: notif.id },
-            data: { status: 'failed' },
-          });
+          delivered = results.some((result) => result);
         }
+
+        await prisma.notification.update({
+          where: { id: notif.id },
+          data: delivered ? { status: 'sent', sentAt: new Date() } : { status: 'failed' },
+        });
       } catch (err) {
         console.error(`[NotificationService] Failed to send ${channel} notification:`, err);
         await prisma.notification.update({
@@ -422,17 +506,13 @@ export const NotificationService = {
    * Get notification preferences for a user (creates defaults on first access).
    */
   async getPreferences(userId: string): Promise<NotificationPreferences> {
-    const existing = await prisma.notificationPreference.findUnique({ where: { userId } });
-
-    if (existing) {
-      return toPreferences(existing);
-    }
-
-    const created = await prisma.notificationPreference.create({
-      data: { userId },
+    const row = await prisma.notificationPreference.upsert({
+      where: { userId },
+      update: {},
+      create: { userId },
     });
 
-    return toPreferences(created);
+    return toPreferences(row);
   },
 
   /**
@@ -448,8 +528,15 @@ export const NotificationService = {
     limit: number;
     hasMore: boolean;
   }> {
-    const page = options.page ?? 1;
-    const limit = options.limit ?? 20;
+    const rawPage = options.page ?? DEFAULT_PAGE;
+    const rawLimit = options.limit ?? DEFAULT_LIMIT;
+
+    const page =
+      Number.isSafeInteger(rawPage) && rawPage > 0 ? Math.min(rawPage, MAX_PAGE) : DEFAULT_PAGE;
+    const limit =
+      Number.isSafeInteger(rawLimit) && rawLimit > 0
+        ? Math.min(rawLimit, MAX_LIMIT)
+        : DEFAULT_LIMIT;
 
     const where = {
       userId,
@@ -501,6 +588,8 @@ export const NotificationService = {
     if (!endpoint || !keys?.p256dh || !keys?.auth) {
       throw new Error('Invalid push subscription');
     }
+
+    await assertPublicEndpoint(endpoint);
 
     await prisma.pushSubscription.upsert({
       where: { userId_endpoint: { userId, endpoint } },

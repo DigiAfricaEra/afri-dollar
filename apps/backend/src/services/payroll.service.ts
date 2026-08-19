@@ -44,6 +44,37 @@ export interface ProcessPayrollResult {
 
 const server = StellarService.getHorizonServer();
 
+// Stellar amounts carry 7 decimal places of precision. We sum payroll totals
+// in integer "stroop" units (scaled by 10^7) using BigInt to avoid the
+// floating-point drift that would occur when adding decimal strings.
+const ASSET_DECIMALS = 7;
+const ASSET_SCALE = 10n ** BigInt(ASSET_DECIMALS);
+
+/**
+ * Parse a decimal amount string into integer stroops (scaled by 10^7).
+ */
+function toStroops(amount: string): bigint {
+  const trimmed = amount.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+    throw new Error(`Invalid amount: ${amount}`);
+  }
+  const [whole, fraction = ''] = trimmed.split('.');
+  const paddedFraction = (fraction + '0'.repeat(ASSET_DECIMALS)).slice(0, ASSET_DECIMALS);
+  return BigInt(whole) * ASSET_SCALE + BigInt(paddedFraction || '0');
+}
+
+/**
+ * Format integer stroops (scaled by 10^7) back into a decimal amount string,
+ * trimming insignificant trailing zeros while always keeping at least one
+ * decimal place.
+ */
+function fromStroops(stroops: bigint): string {
+  const whole = stroops / ASSET_SCALE;
+  const fraction = (stroops % ASSET_SCALE).toString().padStart(ASSET_DECIMALS, '0');
+  const trimmedFraction = fraction.replace(/0+$/, '');
+  return trimmedFraction.length > 0 ? `${whole}.${trimmedFraction}` : `${whole}.0`;
+}
+
 /**
  * Safely extracts error messages from a Stellar Horizon response.
  */
@@ -586,14 +617,24 @@ export const PayrollService = {
       userId,
     });
 
-    await NotificationService.notify(userId, 'payroll-processed', {
-      batchName: batch.name,
-      count: result.successful,
-      total: String(batch.items.reduce((sum, item) => sum + Number(item.amount), 0)),
-      currency: batch.items[0]?.assetCode ?? 'XLM',
-    }).catch((err: unknown) => {
-      console.error('[PayrollService] Failed to send payroll notification:', err);
-    });
+    const totalsByAsset = new Map<string, { count: number; total: bigint }>();
+    for (const item of successfulItems) {
+      const entry = totalsByAsset.get(item.assetCode) ?? { count: 0, total: 0n };
+      entry.count += 1;
+      entry.total += toStroops(item.amount);
+      totalsByAsset.set(item.assetCode, entry);
+    }
+
+    for (const [assetCode, { count, total }] of totalsByAsset) {
+      void NotificationService.notify(userId, 'payroll-processed', {
+        batchName: batch.name,
+        count,
+        total: fromStroops(total),
+        currency: assetCode,
+      }).catch((err: unknown) => {
+        console.error('[PayrollService] Failed to send payroll notification:', err);
+      });
+    }
 
     return result;
   },

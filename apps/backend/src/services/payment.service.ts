@@ -418,7 +418,7 @@ export const PaymentService = {
         userId,
       });
 
-      await NotificationService.notify(userId, 'transaction-completed', {
+      void NotificationService.notify(userId, 'transaction-completed', {
         amount: updatedTx.amount,
         currency: updatedTx.assetCode,
         transactionId: updatedTx.id,
@@ -448,7 +448,7 @@ export const PaymentService = {
         userId,
       });
 
-      await NotificationService.notify(userId, 'transaction-failed', {
+      void NotificationService.notify(userId, 'transaction-failed', {
         amount: updatedTx.amount,
         currency: updatedTx.assetCode,
         transactionId: updatedTx.id,
