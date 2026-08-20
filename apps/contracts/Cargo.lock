@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "afri-contract-shared",
  "k256",
+ "rand_core",
  "soroban-sdk",
 ]
 
