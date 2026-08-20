@@ -784,6 +784,46 @@ impl BridgeContract {
         Ok(())
     }
 
+    /// Explicit no-op migration hook for forward compatibility.
+    ///
+    /// `BridgeRequest` has gained fields (`gross_amount`, `bridge_fee_applied`,
+    /// `unlock_recipient`) and `DataKey` gained entries (`Signers`,
+    /// `SignerThreshold`, `StorageVersion`) since the first deployment.
+    /// A contract upgrade that touches storage layout must therefore ship a
+    /// migration that either repairs or removes incompatible rows. On every
+    /// entry point the contract refuses to operate when the stored
+    /// `StorageVersion` differs from `STORAGE_VERSION`, so a stale state
+    /// fails closed instead of silently re-encoding the old fields.
+    ///
+    /// The admin invokes this hook from a future upgrade transaction to
+    /// bring on-disk state into the current shape. Today the layout is
+    /// current, so the body is a no-op.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The administrator address (authorized via `require_auth`).
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful migration.
+    /// * `Err(Error::Unauthorized)` if the caller is not the admin.
+    pub fn migrate_storage(env: Env, admin: Address) -> Result<(), Error> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &STORAGE_VERSION);
+        extend_instance_ttl(&env);
+        Ok(())
+    }
+
     /// Set the bridge fee percentage (basis points).
     ///
     /// # Arguments
