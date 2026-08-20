@@ -1,8 +1,13 @@
-use crate::{BatchStatus, Error, PayrollContract, PayrollContractClient};
+extern crate std;
+
+use crate::{
+    BatchCancelled, BatchCreated, BatchFunded, BatchStatus, DistributionCompleted, Error,
+    PayrollContract, PayrollContractClient, RecipientAdded,
+};
 use soroban_sdk::{
     testutils::{Address as _, Events},
     token::{StellarAssetClient, TokenClient},
-    Address, Env, IntoVal, Vec,
+    Address, Env, Event,
 };
 
 // Constants
@@ -12,7 +17,6 @@ const FUNDER_BALANCE: i128 = 1_000_000;
 
 struct Fixture {
     contract_id: Address,
-    admin: Address,
     creator: Address,
     funder: Address,
     asset: Address,
@@ -40,7 +44,6 @@ fn setup() -> (Env, Fixture) {
         env,
         Fixture {
             contract_id,
-            admin,
             creator,
             funder,
             asset,
@@ -54,17 +57,6 @@ fn client<'a>(env: &'a Env, f: &Fixture) -> PayrollContractClient<'a> {
 
 fn token<'a>(env: &'a Env, f: &Fixture) -> TokenClient<'a> {
     TokenClient::new(env, &f.asset)
-}
-
-/// Helper: creates a batch and adds `n` recipients of `amount` each.
-fn batch_with_recipients(env: &Env, f: &Fixture, n: u32, amount: i128) -> u64 {
-    let c = client(env, f);
-    let batch_id = c.create_batch(&f.creator, &f.asset);
-    for _ in 0..n {
-        let r = Address::generate(env);
-        c.add_recipient(&f.creator, &batch_id, &r, &amount);
-    }
-    batch_id
 }
 
 // Initialization
@@ -95,7 +87,7 @@ fn initialize_twice_err() {
 // Batch CRUD
 
 #[test]
-fn create_batch_emits_event_and_stores() {
+fn create_batch_stores_batch_correctly() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
@@ -108,13 +100,6 @@ fn create_batch_emits_event_and_stores() {
     assert_eq!(batch.asset, f.asset);
     assert_eq!(batch.status, BatchStatus::Open);
     assert_eq!(batch.total_amount, 0);
-
-    // Verify the event was emitted.
-    let events = env.events().all();
-    assert!(
-        events.len() > 0,
-        "expected at least one event from create_batch"
-    );
 }
 
 #[test]
@@ -179,8 +164,7 @@ fn add_at_max_recipients_200_ok() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
-    // Increase the budget so we can add 200 recipients in a test.
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let batch_id = c.create_batch(&f.creator, &f.asset);
     for _ in 0..200 {
@@ -197,7 +181,7 @@ fn add_201_returns_too_many_recipients() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let batch_id = c.create_batch(&f.creator, &f.asset);
     for _ in 0..200 {
@@ -292,7 +276,7 @@ fn fund_batch_insufficient_balance_of_caller_token_error_propagates() {
     // Add recipient with amount exceeding funder's balance.
     c.add_recipient(&f.creator, &batch_id, &r, &(FUNDER_BALANCE + 1));
 
-    // The token transfer should fail with a host error (insufficient balance).
+    // The token transfer should fail with a host error.
     let result = c.try_fund_batch(&batch_id, &f.funder);
     assert!(result.is_err(), "expected token transfer to fail");
 }
@@ -405,7 +389,7 @@ fn total_amount_overflow_after_large_recipient_sum_errors_overflow() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let batch_id = c.create_batch(&f.creator, &f.asset);
 
@@ -434,6 +418,7 @@ fn get_batch_returns_matching_fields_each_step() {
     assert_eq!(batch.status, BatchStatus::Open);
     assert_eq!(batch.total_amount, 0);
 
+    // Add recipient
     c.add_recipient(&f.creator, &batch_id, &r, &500);
     let batch = c.get_batch(&batch_id);
     assert_eq!(batch.total_amount, 500);
@@ -464,18 +449,27 @@ fn get_batch_not_found() {
 // Events
 
 #[test]
-fn create_batch_event_has_correct_topics() {
+fn create_batch_event_is_correct() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
-    c.create_batch(&f.creator, &f.asset);
+    let batch_id = c.create_batch(&f.creator, &f.asset);
 
     let events = env.events().all();
-    assert!(events.len() > 0, "create_batch should emit an event");
+    let actual = events.events().last().expect("expected create_batch event");
+
+    let expected = BatchCreated {
+        batch_id,
+        creator: f.creator.clone(),
+        asset: f.asset.clone(),
+    }
+    .to_xdr(&env, &f.contract_id);
+
+    assert_eq!(actual, &expected);
 }
 
 #[test]
-fn add_recipient_emits_event() {
+fn add_recipient_event_is_correct() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
@@ -484,56 +478,89 @@ fn add_recipient_emits_event() {
     c.add_recipient(&f.creator, &batch_id, &recipient, &300);
 
     let events = env.events().all();
-    // At least the RecipientAdded event (plus the BatchCreated from create_batch).
-    assert!(
-        events.len() >= 2,
-        "expected events from create_batch and add_recipient"
-    );
+    let actual = events
+        .events()
+        .last()
+        .expect("expected add_recipient event");
+
+    let expected = RecipientAdded {
+        batch_id,
+        recipient: recipient.clone(),
+        amount: 300,
+    }
+    .to_xdr(&env, &f.contract_id);
+
+    assert_eq!(actual, &expected);
 }
 
 #[test]
-fn fund_batch_emits_event() {
+fn fund_batch_event_is_correct() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
     let batch_id = c.create_batch(&f.creator, &f.asset);
-    let r = Address::generate(&env);
-    c.add_recipient(&f.creator, &batch_id, &r, &100);
+    let recipient = Address::generate(&env);
+
+    c.add_recipient(&f.creator, &batch_id, &recipient, &100);
+
     c.fund_batch(&batch_id, &f.funder);
 
     let events = env.events().all();
-    // BatchCreated + RecipientAdded + token transfer + BatchFunded.
-    assert!(events.len() >= 3, "expected fund_batch to emit an event");
+    let actual = events.events().last().expect("expected fund_batch event");
+
+    let expected = BatchFunded {
+        batch_id,
+        funder: f.funder.clone(),
+        total_amount: 100,
+    }
+    .to_xdr(&env, &f.contract_id);
+
+    assert_eq!(actual, &expected);
 }
 
 #[test]
-fn distribute_emits_event() {
+fn distribute_event_is_correct() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
     let batch_id = c.create_batch(&f.creator, &f.asset);
     let r = Address::generate(&env);
+
     c.add_recipient(&f.creator, &batch_id, &r, &100);
     c.fund_batch(&batch_id, &f.funder);
     c.distribute(&batch_id);
 
     let events = env.events().all();
-    // BatchCreated + RecipientAdded + token xfer(fund) + BatchFunded
-    //   + token xfer(distribute) + DistributionCompleted.
-    assert!(events.len() >= 5, "expected distribute to emit events");
+    let actual = events.events().last().expect("expected distribution event");
+
+    let expected = DistributionCompleted {
+        batch_id,
+        total_amount: 100,
+    }
+    .to_xdr(&env, &f.contract_id);
+
+    assert_eq!(actual, &expected);
 }
 
 #[test]
-fn cancel_batch_emits_event() {
+fn cancel_batch_event_is_correct() {
     let (env, f) = setup();
     let c = client(&env, &f);
 
     let batch_id = c.create_batch(&f.creator, &f.asset);
+
     c.cancel_batch(&f.creator, &batch_id);
 
     let events = env.events().all();
-    // BatchCreated + BatchCancelled.
-    assert!(events.len() >= 2, "expected cancel_batch to emit an event");
+    let actual = events.events().last().expect("expected cancel_batch event");
+
+    let expected = BatchCancelled {
+        batch_id,
+        creator: f.creator.clone(),
+    }
+    .to_xdr(&env, &f.contract_id);
+
+    assert_eq!(actual, &expected);
 }
 
 // Additional edge cases
