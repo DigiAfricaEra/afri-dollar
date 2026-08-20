@@ -26,6 +26,12 @@ const ACTION_UNLOCK: u8 = 2;
 const SIGNATURE_BLOCK_SIZE: u32 = 65;
 /// Maximum accepted ECDSA recovery id (`0..=3`).
 const MAX_RECOVERY_ID: u32 = 3;
+/// Bridge fee upper bound, expressed in basis points (10000 = 100%).
+const MAX_BRIDGE_FEE_BPS: u32 = 10_000;
+/// Current on-disk storage schema version. Bumped on every breaking layout
+/// change so the contract can refuse to operate on a state written by an
+/// older, incompatible deployment.
+const STORAGE_VERSION: u32 = 2;
 
 /// Bridge request status enum.
 #[contracttype]
@@ -90,6 +96,9 @@ enum DataKey {
     Signers,
     /// Minimum number of distinct signer signatures required to accept a proof.
     SignerThreshold,
+    /// On-disk schema version; refuses operations when the stored value differs
+    /// from the current `STORAGE_VERSION`.
+    StorageVersion,
 }
 
 /// Event published when a bridge request is initiated.
@@ -197,6 +206,38 @@ pub enum BridgeError {
     InsufficientFees = 1,
     /// A fee withdrawal was attempted by a non-admin caller.
     FeeWithdrawalUnauthorized = 2,
+    /// On-disk storage schema is from an older, incompatible deployment.
+    InvalidStorageVersion = 3,
+    /// The unlock would draw down the contract's collected-fee reserve.
+    InsufficientLiquidity = 4,
+    /// The bridge fee was set above `MAX_BRIDGE_FEE_BPS` or the resulting net
+    /// amount would be non-positive.
+    InvalidFee = 5,
+    /// The signer set contains duplicate or invalid entries.
+    DuplicateSigner = 6,
+}
+
+/// Encode an `Address` into a stable byte form for use inside a proof digest.
+/// Strkey encoding (G... for accounts, C... for contracts) is canonical and
+/// unambiguous per network, so two equal addresses always produce equal bytes
+/// and two different addresses always produce different bytes.
+fn address_bytes(addr: &Address) -> Bytes {
+    addr.to_string().to_bytes()
+}
+
+/// Reject a caller when the on-disk storage schema is from a previous release.
+/// Deployments with a stale `StorageVersion` (or none) must be migrated
+/// explicitly before this contract will operate on them.
+fn require_storage_version(env: &Env) -> Result<(), Error> {
+    let stored: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::StorageVersion)
+        .unwrap_or(0);
+    if stored != STORAGE_VERSION {
+        return Err(Error::InvalidVersion);
+    }
+    Ok(())
 }
 
 /// Verify an ECDSA multi-signature proof against the configured oracle signer
@@ -204,9 +245,20 @@ pub enum BridgeError {
 ///
 /// The proof is a sequence of 65-byte blocks, each containing a one-byte
 /// recovery id followed by a 64-byte `r || s` signature. Every signature is
-/// recovered against `sha256(action || request_id)` and must belong to a
-/// configured signer. At least `threshold` distinct signers must be present.
-fn verify_proof(env: &Env, proof: &Bytes, action: u8, request_id: u64) -> Result<(), Error> {
+/// recovered against `sha256(contract || action || request_id || asset ||
+/// amount || destination)` and must belong to a configured signer. At least
+/// `threshold` distinct signers must be present. Domain-separating the
+/// digest across these fields prevents replay across deployments and stops a
+/// single proof from authorizing an arbitrary asset / amount / recipient.
+fn verify_proof(
+    env: &Env,
+    proof: &Bytes,
+    action: u8,
+    request_id: u64,
+    asset: &Address,
+    amount: i128,
+    destination: &Address,
+) -> Result<(), Error> {
     let signers: Vec<BytesN<65>> = env
         .storage()
         .instance()
@@ -227,10 +279,14 @@ fn verify_proof(env: &Env, proof: &Bytes, action: u8, request_id: u64) -> Result
         return Err(Error::Unauthorized);
     }
 
-    let mut msg = [0u8; 9];
-    msg[0] = action;
-    msg[1..].copy_from_slice(&request_id.to_be_bytes());
-    let digest = env.crypto().sha256(&Bytes::from_array(env, &msg));
+    let mut msg = Bytes::new(env);
+    msg.append(&address_bytes(&env.current_contract_address()));
+    msg.push_back(action);
+    msg.extend_from_array(&request_id.to_be_bytes());
+    msg.append(&address_bytes(asset));
+    msg.extend_from_array(&amount.to_be_bytes());
+    msg.append(&address_bytes(destination));
+    let digest = env.crypto().sha256(&msg);
 
     // Track which signer slots matched so duplicate signatures count once.
     let mut matched: Vec<bool> = Vec::new(env);
@@ -253,6 +309,8 @@ fn verify_proof(env: &Env, proof: &Bytes, action: u8, request_id: u64) -> Result
         for j in 0..signers.len() {
             if signers.get(j).unwrap() == recovered && !matched.get(j).unwrap() {
                 matched.set(j, true);
+                // A recovered key only maps to one signer slot; skip the rest.
+                break;
             }
         }
     }
@@ -289,9 +347,14 @@ impl BridgeContract {
             return Err(Error::AlreadyInitialized);
         }
 
+        admin.require_auth();
+
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::NextRequestId, &1u64);
         env.storage().instance().set(&DataKey::BridgeFee, &30u32); // 0.30% default fee
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &STORAGE_VERSION);
 
         extend_instance_ttl(&env);
         Ok(())
@@ -346,8 +409,17 @@ impl BridgeContract {
             .get(&DataKey::BridgeFee)
             .unwrap_or(30);
 
+        // Guard against a fee setting that would consume the entire deposit
+        // (or, in the limit, refund the sender). The net amount must remain
+        // strictly positive for the bridge request to be meaningful.
+        if bridge_fee > MAX_BRIDGE_FEE_BPS {
+            return Err(Error::InvalidAmount);
+        }
         let fee_amount = (amount * bridge_fee as i128) / 10000;
         let net_amount = amount - fee_amount;
+        if net_amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
 
         // Pull the full gross amount into the contract; the fee stays with the
         // contract as treasury, the net is owed to the wrapped-asset minter.
@@ -423,6 +495,8 @@ impl BridgeContract {
         proof: Bytes,
         wrapped_asset_issuer: Address,
     ) -> Result<(), Error> {
+        require_storage_version(&env)?;
+
         let mut request: BridgeRequest = env
             .storage()
             .instance()
@@ -433,7 +507,28 @@ impl BridgeContract {
             return Err(Error::Unauthorized);
         }
 
-        verify_proof(&env, &proof, ACTION_MINT, bridge_request_id)?;
+        // Verify the proof against the destination: the same proof bytes cannot
+        // authorize a payout to any other address. Combined with the
+        // status-mutation order below, this prevents replay-by-resubmission
+        // from stealing the locked funds.
+        verify_proof(
+            &env,
+            &proof,
+            ACTION_MINT,
+            bridge_request_id,
+            &request.asset,
+            request.amount,
+            &wrapped_asset_issuer,
+        )?;
+
+        // Persist the terminal status before performing any external token
+        // transfer. If the transfer were to fail the request would still be
+        // marked Minted; doing this first keeps the state machine honest.
+        request.status = BridgeStatus::Minted;
+        request.completed_at = Some(env.ledger().timestamp());
+        env.storage()
+            .instance()
+            .set(&DataKey::BridgeRequest(bridge_request_id), &request);
 
         // Release the net amount to the wrapped-asset minter, which holds it
         // as collateral for the wrapped tokens minted on the destination chain.
@@ -443,16 +538,8 @@ impl BridgeContract {
             &request.amount,
         );
 
-        request.status = BridgeStatus::Minted;
-        request.completed_at = Some(env.ledger().timestamp());
-
-        env.storage()
-            .instance()
-            .set(&DataKey::BridgeRequest(bridge_request_id), &request);
-
         extend_instance_ttl(&env);
 
-        // Emit event
         WrappedMinted {
             request_id: bridge_request_id,
             amount: request.amount,
@@ -485,6 +572,8 @@ impl BridgeContract {
         source_chain: Symbol,
         recipient: Address,
     ) -> Result<u64, Error> {
+        require_storage_version(&env)?;
+
         if amount <= 0 {
             return Err(Error::Unauthorized);
         }
@@ -558,6 +647,8 @@ impl BridgeContract {
     /// # Returns
     /// * `Ok(())` on successful unlocking.
     pub fn unlock_asset(env: Env, bridge_request_id: u64, proof: Bytes) -> Result<(), Error> {
+        require_storage_version(&env)?;
+
         let mut request: BridgeRequest = env
             .storage()
             .instance()
@@ -568,12 +659,46 @@ impl BridgeContract {
             return Err(Error::Unauthorized);
         }
 
-        verify_proof(&env, &proof, ACTION_UNLOCK, bridge_request_id)?;
-
         let unlock_recipient: Address = request
             .unlock_recipient
             .clone()
             .ok_or(Error::Unauthorized)?;
+
+        // Verify the proof against the recorded recipient: same proof bytes
+        // cannot authorize a payout to any other Stellar address.
+        verify_proof(
+            &env,
+            &proof,
+            ACTION_UNLOCK,
+            bridge_request_id,
+            &request.asset,
+            request.amount,
+            &unlock_recipient,
+        )?;
+
+        // Reserve the contract's collected-fee balance. The unlock draws from
+        // the same pooled balance that holds the fees; without this check the
+        // admin could find their `withdraw_fees` call trap once the pool has
+        // been drained by legitimate unlocks.
+        let collected: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeesCollected(request.asset.clone()))
+            .unwrap_or(0);
+        let pool: i128 =
+            TokenClient::new(&env, &request.asset).balance(&env.current_contract_address());
+        if pool - collected < request.amount {
+            return Err(Error::InsufficientBalance);
+        }
+
+        // Persist the terminal status before the external transfer so the
+        // state machine always reflects the intended outcome, even if the
+        // transfer were to fail at the host boundary.
+        request.status = BridgeStatus::Unlocked;
+        request.completed_at = Some(env.ledger().timestamp());
+        env.storage()
+            .instance()
+            .set(&DataKey::BridgeRequest(bridge_request_id), &request);
 
         // Release the stored net amount to the recipient from the contract's
         // pooled balance of the original asset.
@@ -583,16 +708,8 @@ impl BridgeContract {
             &request.amount,
         );
 
-        request.status = BridgeStatus::Unlocked;
-        request.completed_at = Some(env.ledger().timestamp());
-
-        env.storage()
-            .instance()
-            .set(&DataKey::BridgeRequest(bridge_request_id), &request);
-
         extend_instance_ttl(&env);
 
-        // Emit event
         AssetsUnlocked {
             request_id: bridge_request_id,
             amount: request.amount,
@@ -620,6 +737,16 @@ impl BridgeContract {
         to: Address,
         amount: i128,
     ) -> Result<(), BridgeError> {
+        if env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::StorageVersion)
+            .unwrap_or(0)
+            != STORAGE_VERSION
+        {
+            return Err(BridgeError::InvalidStorageVersion);
+        }
+
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -675,6 +802,10 @@ impl BridgeContract {
 
         admin.require_auth();
 
+        if fee_percentage > MAX_BRIDGE_FEE_BPS {
+            return Err(Error::InvalidAmount);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::BridgeFee, &fee_percentage);
@@ -715,6 +846,16 @@ impl BridgeContract {
 
         if signers.is_empty() || threshold == 0 || threshold > signers.len() {
             return Err(Error::InvalidAmount);
+        }
+
+        // Reject duplicate entries so an attacker cannot satisfy the threshold
+        // by replaying signatures from the same key across multiple slots.
+        for i in 0..signers.len() {
+            for j in (i + 1)..signers.len() {
+                if signers.get(i).unwrap() == signers.get(j).unwrap() {
+                    return Err(Error::InvalidAmount);
+                }
+            }
         }
 
         env.storage().instance().set(&DataKey::Signers, &signers);
