@@ -11,9 +11,9 @@
 //! * Relay transaction proofs for verification
 //! * Bridge fee management
 
-use afri_contract_shared::{extend_instance_ttl, Error};
+use afri_contract_shared::{checked_mul_div, extend_instance_ttl, Error};
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short,
+    contract, contracterror, contractevent, contractimpl, contracttype, crypto::Hash, symbol_short,
     token::TokenClient, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 
@@ -31,7 +31,10 @@ const MAX_BRIDGE_FEE_BPS: u32 = 10_000;
 /// Current on-disk storage schema version. Bumped on every breaking layout
 /// change so the contract can refuse to operate on a state written by an
 /// older, incompatible deployment.
-const STORAGE_VERSION: u32 = 2;
+const STORAGE_VERSION: u32 = 3;
+/// Maximum number of legacy requests rewritten by one migration invocation.
+/// This keeps the admin migration within predictable resource limits.
+const MIGRATION_BATCH_SIZE: u64 = 64;
 
 /// Bridge request status enum.
 #[contracttype]
@@ -78,6 +81,24 @@ pub struct BridgeRequest {
     pub completed_at: Option<u64>,
 }
 
+/// The request layout written by the pre-fee bridge deployment. Keep this
+/// type stable: `migrate_storage` decodes old rows with it before rewriting
+/// them into the current `BridgeRequest` layout.
+#[contracttype]
+#[derive(Clone)]
+struct LegacyBridgeRequest {
+    id: u64,
+    source_chain: Symbol,
+    destination_chain: Symbol,
+    asset: Address,
+    amount: i128,
+    sender: Address,
+    recipient: Bytes,
+    status: BridgeStatus,
+    created_at: u64,
+    completed_at: Option<u64>,
+}
+
 /// Storage keys for the bridge contract.
 #[contracttype]
 #[derive(Clone)]
@@ -99,6 +120,10 @@ enum DataKey {
     /// On-disk schema version; refuses operations when the stored value differs
     /// from the current `STORAGE_VERSION`.
     StorageVersion,
+    /// Next legacy request ID to process during a bounded migration.
+    MigrationCursor,
+    /// Admin-configured mapping from wrapped token to its original asset.
+    AssetPair(Address),
 }
 
 /// Event published when a bridge request is initiated.
@@ -208,13 +233,6 @@ pub enum BridgeError {
     FeeWithdrawalUnauthorized = 2,
     /// On-disk storage schema is from an older, incompatible deployment.
     InvalidStorageVersion = 3,
-    /// The unlock would draw down the contract's collected-fee reserve.
-    InsufficientLiquidity = 4,
-    /// The bridge fee was set above `MAX_BRIDGE_FEE_BPS` or the resulting net
-    /// amount would be non-positive.
-    InvalidFee = 5,
-    /// The signer set contains duplicate or invalid entries.
-    DuplicateSigner = 6,
 }
 
 /// Encode an `Address` into a stable byte form for use inside a proof digest.
@@ -223,6 +241,54 @@ pub enum BridgeError {
 /// and two different addresses always produce different bytes.
 fn address_bytes(addr: &Address) -> Bytes {
     addr.to_string().to_bytes()
+}
+
+/// Build the one canonical digest signed by bridge oracle keys.
+///
+/// The preimage is `contract || action || request_id_be8 || asset ||
+/// amount_be16 || destination`. Keeping this in the contract crate lets the
+/// integration example and unit tests use exactly the same field ordering as
+/// on-chain verification.
+#[allow(clippy::too_many_arguments)]
+pub fn proof_digest(
+    env: &Env,
+    contract_address: &Address,
+    action: u8,
+    request_id: u64,
+    asset: &Address,
+    amount: i128,
+    destination: &Address,
+) -> Hash<32> {
+    let mut msg = Bytes::new(env);
+    msg.append(&address_bytes(contract_address));
+    msg.push_back(action);
+    msg.extend_from_array(&request_id.to_be_bytes());
+    msg.append(&address_bytes(asset));
+    msg.extend_from_array(&amount.to_be_bytes());
+    msg.append(&address_bytes(destination));
+    env.crypto().sha256(&msg)
+}
+
+/// The secp256k1 group order. `secp256k1_recover` traps on malformed scalar
+/// inputs in soroban-sdk 26, so validate both signature scalars first.
+const SECP256K1_ORDER: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+    0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
+];
+
+fn is_valid_secp256k1_scalar(bytes: &[u8]) -> bool {
+    if bytes.iter().all(|byte| *byte == 0) {
+        return false;
+    }
+    for (byte, limit) in bytes.iter().zip(SECP256K1_ORDER.iter()) {
+        if byte < limit {
+            return true;
+        }
+        if byte > limit {
+            return false;
+        }
+    }
+    false
 }
 
 /// Reject a caller when the on-disk storage schema is from a previous release.
@@ -279,14 +345,15 @@ fn verify_proof(
         return Err(Error::Unauthorized);
     }
 
-    let mut msg = Bytes::new(env);
-    msg.append(&address_bytes(&env.current_contract_address()));
-    msg.push_back(action);
-    msg.extend_from_array(&request_id.to_be_bytes());
-    msg.append(&address_bytes(asset));
-    msg.extend_from_array(&amount.to_be_bytes());
-    msg.append(&address_bytes(destination));
-    let digest = env.crypto().sha256(&msg);
+    let digest = proof_digest(
+        env,
+        &env.current_contract_address(),
+        action,
+        request_id,
+        asset,
+        amount,
+        destination,
+    );
 
     // Track which signer slots matched so duplicate signatures count once.
     let mut matched: Vec<bool> = Vec::new(env);
@@ -303,6 +370,12 @@ fn verify_proof(
         let signature =
             BytesN::<64>::try_from(proof.slice(offset + 1..offset + SIGNATURE_BLOCK_SIZE))
                 .map_err(|_| Error::Unauthorized)?;
+        let signature_bytes = signature.to_array();
+        if !is_valid_secp256k1_scalar(&signature_bytes[..32])
+            || !is_valid_secp256k1_scalar(&signature_bytes[32..])
+        {
+            return Err(Error::Unauthorized);
+        }
         let recovered = env
             .crypto()
             .secp256k1_recover(&digest, &signature, recovery_id);
@@ -355,6 +428,12 @@ impl BridgeContract {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &STORAGE_VERSION);
+        env.storage()
+            .instance()
+            .set(&DataKey::Signers, &Vec::<BytesN<65>>::new(&env));
+        env.storage()
+            .instance()
+            .set(&DataKey::SignerThreshold, &2u32);
 
         extend_instance_ttl(&env);
         Ok(())
@@ -395,6 +474,8 @@ impl BridgeContract {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
 
+        require_storage_version(&env)?;
+
         caller.require_auth();
 
         let next_id: u64 = env
@@ -402,6 +483,10 @@ impl BridgeContract {
             .instance()
             .get(&DataKey::NextRequestId)
             .unwrap_or(1);
+        let next_id_after = next_id.checked_add(1).ok_or(Error::Overflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::NextRequestId, &next_id_after);
 
         let bridge_fee: u32 = env
             .storage()
@@ -415,7 +500,14 @@ impl BridgeContract {
         if bridge_fee > MAX_BRIDGE_FEE_BPS {
             return Err(Error::InvalidAmount);
         }
-        let fee_amount = (amount * bridge_fee as i128) / 10000;
+        // Checked multiplication: `amount` is caller-supplied and the asset
+        // is a caller-supplied token contract, so a hostile asset could
+        // claim any balance. With bridge_fee at 30 bps, an amount above
+        // i128::MAX / 30 overflows the product; the release profile does not
+        // enable overflow-checks, so a wrapping product would silently
+        // produce a negative fee and a net value larger than `amount`. A
+        // checked arithmetic trap closes that gap deterministically.
+        let fee_amount: i128 = checked_mul_div(amount, bridge_fee as i128, 10_000)?;
         let net_amount = amount - fee_amount;
         if net_amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -430,10 +522,10 @@ impl BridgeContract {
             .instance()
             .get(&DataKey::FeesCollected(asset.clone()))
             .unwrap_or(0);
-        env.storage().instance().set(
-            &DataKey::FeesCollected(asset.clone()),
-            &(collected + fee_amount),
-        );
+        let new_collected = collected.checked_add(fee_amount).ok_or(Error::Overflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::FeesCollected(asset.clone()), &new_collected);
 
         let request = BridgeRequest {
             id: next_id,
@@ -454,10 +546,6 @@ impl BridgeContract {
         env.storage()
             .instance()
             .set(&DataKey::BridgeRequest(next_id), &request);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::NextRequestId, &(next_id + 1));
 
         extend_instance_ttl(&env);
 
@@ -584,6 +672,15 @@ impl BridgeContract {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
 
+        let configured_asset: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::AssetPair(wrapped_token.clone()))
+            .ok_or(Error::AssetNotFound)?;
+        if configured_asset != asset {
+            return Err(Error::AssetNotFound);
+        }
+
         caller.require_auth();
 
         let next_id: u64 = env
@@ -591,6 +688,10 @@ impl BridgeContract {
             .instance()
             .get(&DataKey::NextRequestId)
             .unwrap_or(1);
+        let next_id_after = next_id.checked_add(1).ok_or(Error::Overflow)?;
+        env.storage()
+            .instance()
+            .set(&DataKey::NextRequestId, &next_id_after);
 
         // Deposit the wrapped tokens into the contract, retiring them from
         // circulation until the original asset is unlocked.
@@ -619,10 +720,6 @@ impl BridgeContract {
         env.storage()
             .instance()
             .set(&DataKey::BridgeRequest(next_id), &request);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::NextRequestId, &(next_id + 1));
 
         extend_instance_ttl(&env);
 
@@ -687,7 +784,10 @@ impl BridgeContract {
             .unwrap_or(0);
         let pool: i128 =
             TokenClient::new(&env, &request.asset).balance(&env.current_contract_address());
-        if pool - collected < request.amount {
+        let available = pool
+            .checked_sub(collected)
+            .ok_or(Error::InsufficientBalance)?;
+        if available < request.amount {
             return Err(Error::InsufficientBalance);
         }
 
@@ -784,20 +884,18 @@ impl BridgeContract {
         Ok(())
     }
 
-    /// Explicit no-op migration hook for forward compatibility.
+    /// Migrate bridge state from the pre-fee request layout.
     ///
-    /// `BridgeRequest` has gained fields (`gross_amount`, `bridge_fee_applied`,
-    /// `unlock_recipient`) and `DataKey` gained entries (`Signers`,
-    /// `SignerThreshold`, `StorageVersion`) since the first deployment.
-    /// A contract upgrade that touches storage layout must therefore ship a
-    /// migration that either repairs or removes incompatible rows. On every
-    /// entry point the contract refuses to operate when the stored
-    /// `StorageVersion` differs from `STORAGE_VERSION`, so a stale state
-    /// fails closed instead of silently re-encoding the old fields.
+    /// `BridgeRequest` gained fields (`gross_amount`, `bridge_fee_applied`,
+    /// `unlock_recipient`) and the signer configuration was added after the
+    /// first deployment. This method rewrites legacy rows in bounded batches,
+    /// then initializes an empty signer set and marks the current schema.
     ///
-    /// The admin invokes this hook from a future upgrade transaction to
-    /// bring on-disk state into the current shape. Today the layout is
-    /// current, so the body is a no-op.
+    /// Legacy amounts are preserved as both gross and net with a zero fee,
+    /// because the old layout did not retain the fee split. Legacy burn rows
+    /// retain their status but have no typed unlock recipient; they therefore
+    /// fail closed at `unlock_asset` until an operator performs a controlled
+    /// recovery. No untyped bytes are guessed as an `Address`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -817,9 +915,121 @@ impl BridgeContract {
         }
         admin.require_auth();
 
+        let stored_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(0);
+        if stored_version > STORAGE_VERSION {
+            return Err(Error::InvalidVersion);
+        }
+        if stored_version == STORAGE_VERSION {
+            extend_instance_ttl(&env);
+            return Ok(());
+        }
+
+        // Version 2 already used the expanded request layout. It only needs
+        // the new configuration keys introduced with this version.
+        if stored_version == 2 {
+            if !env.storage().instance().has(&DataKey::Signers) {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Signers, &Vec::<BytesN<65>>::new(&env));
+            }
+            if !env.storage().instance().has(&DataKey::SignerThreshold) {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::SignerThreshold, &2u32);
+            }
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageVersion, &STORAGE_VERSION);
+            extend_instance_ttl(&env);
+            return Ok(());
+        }
+
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextRequestId)
+            .unwrap_or(1);
+        let cursor: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MigrationCursor)
+            .unwrap_or(1);
+        let end = core::cmp::min(cursor.saturating_add(MIGRATION_BATCH_SIZE), next_id);
+
+        let mut request_id = cursor;
+        while request_id < end {
+            if let Some(legacy) = env
+                .storage()
+                .instance()
+                .get::<_, LegacyBridgeRequest>(&DataKey::BridgeRequest(request_id))
+            {
+                let request = BridgeRequest {
+                    id: legacy.id,
+                    source_chain: legacy.source_chain,
+                    destination_chain: legacy.destination_chain,
+                    asset: legacy.asset,
+                    gross_amount: legacy.amount,
+                    amount: legacy.amount,
+                    bridge_fee_applied: 0,
+                    sender: legacy.sender,
+                    recipient: legacy.recipient,
+                    unlock_recipient: None,
+                    status: legacy.status,
+                    created_at: legacy.created_at,
+                    completed_at: legacy.completed_at,
+                };
+                env.storage()
+                    .instance()
+                    .set(&DataKey::BridgeRequest(request_id), &request);
+            }
+            request_id += 1;
+        }
+
+        if end >= next_id {
+            env.storage()
+                .instance()
+                .set(&DataKey::Signers, &Vec::<BytesN<65>>::new(&env));
+            env.storage()
+                .instance()
+                .set(&DataKey::SignerThreshold, &2u32);
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageVersion, &STORAGE_VERSION);
+            env.storage().instance().remove(&DataKey::MigrationCursor);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::MigrationCursor, &end);
+        }
+        extend_instance_ttl(&env);
+        Ok(())
+    }
+
+    /// Register the original asset represented by a wrapped token. Burns are
+    /// accepted only for a pair configured by the administrator.
+    pub fn set_asset_pair(
+        env: Env,
+        admin: Address,
+        wrapped_token: Address,
+        asset: Address,
+    ) -> Result<(), Error> {
+        require_storage_version(&env)?;
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        admin.require_auth();
         env.storage()
             .instance()
-            .set(&DataKey::StorageVersion, &STORAGE_VERSION);
+            .set(&DataKey::AssetPair(wrapped_token), &asset);
         extend_instance_ttl(&env);
         Ok(())
     }
@@ -834,6 +1044,7 @@ impl BridgeContract {
     /// * `Ok(())` on successful update.
     /// * `Err(Error::Unauthorized)` if caller is not admin.
     pub fn set_bridge_fee(env: Env, fee_percentage: u32) -> Result<(), Error> {
+        require_storage_version(&env)?;
         let admin: Address = env
             .storage()
             .instance()
@@ -874,6 +1085,7 @@ impl BridgeContract {
         signers: Vec<BytesN<65>>,
         threshold: u32,
     ) -> Result<(), Error> {
+        require_storage_version(&env)?;
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -949,6 +1161,13 @@ impl BridgeContract {
             .instance()
             .get(&DataKey::FeesCollected(asset))
             .unwrap_or(0)
+    }
+
+    /// Get the original asset configured for a wrapped token.
+    pub fn get_asset_pair(env: Env, wrapped_token: Address) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AssetPair(wrapped_token))
     }
 
     /// Get the configured proof-signing oracle set.

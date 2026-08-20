@@ -22,7 +22,7 @@
 //! ```text
 //! cargo run -p afri-contract-bridge --example sign_proof -- sign \
 //!     <priv1_hex> <priv2_hex> <priv3_hex> ... mint|unlock <request_id> \
-//>     <contract_address_strkey> <asset_strkey> <amount> <destination_strkey>
+//!     <contract_address_strkey> <asset_strkey> <amount> <destination_strkey>
 //! ```
 //!
 //! # Security caveat
@@ -31,9 +31,10 @@
 //! history and to any process listing on the host. For real deployments use
 //! a HSM, an env var, or read the keys from a secrets manager.
 
+use afri_contract_bridge::proof_digest;
 use k256::ecdsa::{RecoveryId, Signature, SigningKey};
-use k256::sha2::{Digest, Sha256};
 use rand_core::OsRng;
+use soroban_sdk::{Address, Env, String as SorobanString};
 
 const ACTION_MINT: u8 = 1;
 const ACTION_UNLOCK: u8 = 2;
@@ -69,44 +70,31 @@ fn parse_private_key(hex: &str) -> Result<SigningKey, String> {
     SigningKey::from_slice(&array).map_err(|e| format!("invalid secp256k1 scalar: {e}"))
 }
 
-/// Build the proof preimage. The bytes are appended in the exact order the
-/// contract computes its digest so a recovery on-chain matches the signature.
-fn proof_digest(
-    contract_address: &str,
-    action: u8,
-    request_id: u64,
-    asset: &str,
-    amount: i128,
-    destination: &str,
-) -> [u8; 32] {
-    let mut msg: Vec<u8> = Vec::new();
-    msg.extend_from_slice(contract_address.as_bytes());
-    msg.push(action);
-    msg.extend_from_slice(&request_id.to_be_bytes());
-    msg.extend_from_slice(asset.as_bytes());
-    msg.extend_from_slice(&amount.to_be_bytes());
-    msg.extend_from_slice(destination.as_bytes());
-    let hash: [u8; 32] = Sha256::digest(msg).into();
-    hash
+fn parse_address(env: &Env, value: &str) -> Address {
+    Address::from_string(&SorobanString::from_str(env, value))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sign_proof(
+    env: &Env,
     keys: &[&SigningKey],
-    contract_address: &str,
+    contract_address: &Address,
     action: u8,
     request_id: u64,
-    asset: &str,
+    asset: &Address,
     amount: i128,
-    destination: &str,
+    destination: &Address,
 ) -> Vec<u8> {
     let digest = proof_digest(
+        env,
         contract_address,
         action,
         request_id,
         asset,
         amount,
         destination,
-    );
+    )
+    .to_array();
     let mut proof = Vec::new();
     for key in keys {
         let (sig, recovery_id): (Signature, RecoveryId) = key
@@ -135,7 +123,7 @@ fn main() {
                 println!("KEY{}_PUB=0x{}", i + 1, hex_encode(&pubkey));
             }
         }
-        Some("sign") if args.len() >= 9 => {
+        Some("sign") if args.len() >= 8 => {
             // Layout:
             //   sign <priv1_hex> <priv2_hex> ... mint|unlock <request_id>
             //     <contract_strkey> <asset_strkey> <amount> <destination_strkey>
@@ -167,14 +155,19 @@ fn main() {
                 keys.push(parse_private_key(raw).expect("invalid private key"));
             }
             let key_refs: Vec<&SigningKey> = keys.iter().collect();
+            let env = Env::default();
+            let contract_address = parse_address(&env, contract_address);
+            let asset = parse_address(&env, asset);
+            let destination = parse_address(&env, destination);
             let proof = sign_proof(
+                &env,
                 &key_refs,
-                contract_address,
+                &contract_address,
                 action,
                 request_id,
-                asset,
+                &asset,
                 amount,
-                destination,
+                &destination,
             );
             assert_eq!(proof.len(), key_refs.len() * SIGNATURE_BLOCK_SIZE);
             println!("0x{}", hex_encode(&proof));

@@ -1,14 +1,16 @@
+extern crate std;
+
 use crate::{
-    BridgeContract, BridgeContractClient, BridgeError, BridgeRequest, BridgeStatus, ACTION_MINT,
-    ACTION_UNLOCK,
+    proof_digest, BridgeContract, BridgeContractClient, BridgeError, BridgeInitiated,
+    BridgeRequest, BridgeStatus, DataKey, LegacyBridgeRequest, ACTION_MINT, ACTION_UNLOCK,
 };
 use afri_contract_shared::Error;
 use k256::ecdsa::SigningKey;
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, MockAuth, MockAuthInvoke},
     token::{StellarAssetClient, TokenClient},
-    Address, Bytes, BytesN, Env, Vec,
+    Address, Bytes, BytesN, Env, Event, IntoVal, Vec,
 };
 
 const INITIAL_SUPPLY: i128 = 1_000_000;
@@ -60,6 +62,7 @@ fn setup() -> (Env, Fixture) {
     let signer3 = signing_key(3);
 
     // Configure the 2-of-3 oracle signer set.
+    client.set_asset_pair(&admin, &wrapped_asset, &asset);
     client.set_signers(&admin, &signer_vec(&env, &signer1, &signer2, &signer3), &2);
 
     (
@@ -117,25 +120,6 @@ fn signer_vec(
     ]
 }
 
-fn proof_digest(
-    env: &Env,
-    contract_address: &Address,
-    action: u8,
-    request_id: u64,
-    asset: &Address,
-    amount: i128,
-    destination: &Address,
-) -> [u8; 32] {
-    let mut msg = Bytes::new(env);
-    msg.append(&contract_address.to_string().to_bytes());
-    msg.push_back(action);
-    msg.extend_from_array(&request_id.to_be_bytes());
-    msg.append(&asset.to_string().to_bytes());
-    msg.extend_from_array(&amount.to_be_bytes());
-    msg.append(&destination.to_string().to_bytes());
-    env.crypto().sha256(&msg).to_array()
-}
-
 /// Build a multi-signature proof for a single action against the configured
 /// signers. The action byte and request id, together with the asset, amount,
 /// and destination, are all folded into the signed preimage so the contract
@@ -160,7 +144,8 @@ fn sign_request(
         asset,
         amount,
         destination,
-    );
+    )
+    .to_array();
     for key in keys {
         let (sig, recid) = key
             .sign_prehash_recoverable(&digest)
@@ -278,6 +263,30 @@ fn initialize_is_one_time_only() {
 }
 
 #[test]
+fn initialize_requires_a_matching_authorization() {
+    let env = Env::default();
+    let contract_id = env.register(BridgeContract, ());
+    let client = BridgeContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    // No authorization entry means the host rejects the admin.require_auth()
+    // call rather than treating a caller-supplied address as authorization.
+    assert!(client.try_initialize(&admin).is_err());
+
+    client
+        .mock_auths(&[MockAuth {
+            address: &admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "initialize",
+                args: (&admin,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }])
+        .initialize(&admin);
+}
+
+#[test]
 fn initialize_before_operations_errors() {
     let env = Env::default();
     env.mock_all_auths();
@@ -352,15 +361,21 @@ fn lock_asset_tracks_collected_fees() {
 #[test]
 fn lock_asset_emits_event() {
     let (env, fixture) = setup();
-    lock(&env, &fixture, &fixture.user, 10_000);
-
-    let events = env.events().all();
-    let empty: soroban_sdk::Vec<(
-        Address,
-        soroban_sdk::Vec<soroban_sdk::Val>,
-        soroban_sdk::Val,
-    )> = soroban_sdk::vec![&env];
-    assert_ne!(events, empty, "expected at least one event to be emitted");
+    let request_id = lock(&env, &fixture, &fixture.user, 10_000);
+    let expected = BridgeInitiated {
+        request_id,
+        source_chain: symbol_short!("stellar"),
+        destination_chain: symbol_short!("ethereum"),
+        asset: fixture.asset.clone(),
+        amount: 9_970,
+        gross_amount: 10_000,
+        fee_amount: 30,
+        sender: fixture.user.clone(),
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&fixture.contract_id),
+        std::vec![expected.to_xdr(&env, &fixture.contract_id)]
+    );
 }
 
 #[test]
@@ -570,6 +585,28 @@ fn burn_wrapped_creates_burn_request_and_deposits_wrapped() {
     assert_eq!(
         token(&env, &fixture.wrapped_asset).balance(&fixture.contract_id),
         500
+    );
+}
+
+#[test]
+fn burn_wrapped_rejects_an_unregistered_asset_pair() {
+    let (env, fixture) = setup();
+    let other_asset = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+
+    let result = client(&env, &fixture).try_burn_wrapped(
+        &fixture.wrapped_holder,
+        &other_asset,
+        &fixture.wrapped_asset,
+        &500,
+        &symbol_short!("ethereum"),
+        &fixture.recipient,
+    );
+    assert_eq!(result, Err(Ok(Error::AssetNotFound)));
+    assert_eq!(
+        token(&env, &fixture.wrapped_asset).balance(&fixture.wrapped_holder),
+        INITIAL_SUPPLY
     );
 }
 
@@ -931,24 +968,6 @@ fn lock_rejects_100_percent_fee() {
     );
 }
 
-/// Even with the fee in range, a fee large enough to consume the entire
-/// deposit leaves nothing for the net amount. The contract must reject the
-/// lock and not transfer any tokens.
-#[test]
-fn lock_rejects_fee_that_empties_deposit() {
-    let (env, fixture) = setup();
-    // 100% fee.
-    client(&env, &fixture).set_bridge_fee(&10_000);
-    let result = client(&env, &fixture).try_lock_asset(
-        &fixture.user,
-        &fixture.asset,
-        &1_000,
-        &symbol_short!("ethereum"),
-        &recipient_bytes(&env),
-    );
-    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
-}
-
 /// If unlocks drain the pool down to the collected-fee reserve, the next
 /// unlock must fail rather than spend the admin's fees. Withdraw must then
 /// succeed for the still-tracked fee total.
@@ -991,10 +1010,8 @@ fn unlock_refuses_to_spend_fee_reserve() {
 }
 
 /// A length-valid proof block whose `r || s` is not a valid secp256k1
-/// signature must be rejected without a host panic. Recovery for an invalid
-/// signature panics in `secp256k1_recover`; the contract does not currently
-/// catch it. This test documents the trap behavior so a future hardening
-/// pass can replace it with a clean `Unauthorized` return.
+/// A length-valid proof with zero `r` and `s` must be rejected before recovery,
+/// so attacker-controlled malformed signatures cannot trigger a host trap.
 #[test]
 fn mint_wrapped_rejects_invalid_signature_payload() {
     let (env, fixture) = setup();
@@ -1009,18 +1026,8 @@ fn mint_wrapped_rejects_invalid_signature_payload() {
     bogus.push_back(0u8);
     bogus.extend_from_array(&[0u8; 64]); // second signature
 
-    let _ = bogus; // silence unused warning if the assertion changes
     let result = client(&env, &fixture).try_mint_wrapped(&request_id, &bogus, &fixture.issuer);
-    // The recovery host function traps on a zero signature; accept either a
-    // clean Unauthorized return or the host trap (Err(Err(...))).
-    match result {
-        Err(Ok(Error::Unauthorized)) => {}
-        Err(Err(_)) => {}
-        other => panic!(
-            "expected rejection of invalid signature payload, got {:?}",
-            other
-        ),
-    }
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 /// A duplicate signer key in the configured signer set is rejected so that
@@ -1046,20 +1053,20 @@ fn set_signers_rejects_duplicates() {
 fn lock_asset_emits_bridge_initiated_event() {
     let (env, fixture) = setup();
     let request_id = lock(&env, &fixture, &fixture.user, 10_000);
-
-    // The bridge contract publishes at least one BridgeInitiated event for
-    // this lock. Other operations (token transfers, etc.) also emit under
-    // the bridge contract via the AssetLocked event for completeness; we
-    // assert that the BridgeInitiated data carries gross / net / fee.
-    let bridge_events = env.events().all().filter_by_contract(&fixture.contract_id);
-    let bridge_event_count = bridge_events.events().len();
-    assert!(
-        bridge_event_count >= 1,
-        "expected at least one bridge event after a lock"
+    let expected = BridgeInitiated {
+        request_id,
+        source_chain: symbol_short!("stellar"),
+        destination_chain: symbol_short!("ethereum"),
+        asset: fixture.asset.clone(),
+        amount: 9_970,
+        gross_amount: 10_000,
+        fee_amount: 30,
+        sender: fixture.user.clone(),
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&fixture.contract_id),
+        std::vec![expected.to_xdr(&env, &fixture.contract_id)]
     );
-
-    // The stored request records the same numbers, so any consumer reading
-    // both the event and the request will see consistent numbers.
     let request = client(&env, &fixture)
         .get_bridge_request(&request_id)
         .unwrap();
@@ -1095,6 +1102,7 @@ fn auth_entry_points_require_signatures() {
     // Mint some tokens so the user has something to lock.
     StellarAssetClient::new(&env, &asset).mint(&user, &1_000_000);
     StellarAssetClient::new(&env, &wrapped_asset).mint(&user, &1_000_000);
+    client.set_asset_pair(&admin, &wrapped_asset, &asset);
 
     // lock_asset: caller.require_auth() runs.
     client.lock_asset(
@@ -1153,26 +1161,27 @@ fn proof_is_not_portable_across_bridge_deployments() {
         &[&fixture.signer1, &fixture.signer2],
     );
 
-    // Register the same request on the other bridge by depositing into the
-    // burn path; this is the only way to materialize a request with
-    // matching amount + destination on the second bridge without bypassing
-    // the proof.
+    // Configure the fee before creating the matching request. The first
+    // request advances the second bridge to the same request ID as `req2`.
+    other_client.set_bridge_fee(&0u32);
     other_client.lock_asset(
+        &fixture.user,
+        &fixture.asset,
+        &1,
+        &symbol_short!("ethereum"),
+        &recipient_bytes(&env),
+    );
+    let other_request_id = other_client.lock_asset(
         &fixture.user,
         &fixture.asset,
         &request2.amount,
         &symbol_short!("ethereum"),
         &recipient_bytes(&env),
     );
-    other_client.set_bridge_fee(&0u32);
+    assert_eq!(other_request_id, req2);
 
-    let result = other_client.try_mint_wrapped(&req2, &proof, &fixture.issuer);
-    // The proof was signed for fixture.contract_id, but the request is on
-    // other_bridge; verify_proof recovers pubkeys against the wrong
-    // contract address and rejects. Either it fails with Unauthorized, or
-    // if the other bridge has no request under that id, it fails with
-    // NotInitialized; either way the proof is not honored.
-    assert!(result.is_err());
+    let result = other_client.try_mint_wrapped(&other_request_id, &proof, &fixture.issuer);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
 /// The proof digest binds to the destination. A valid mint proof for one
@@ -1215,6 +1224,7 @@ fn migrate_storage_requires_admin_and_is_idempotent() {
     // The admin can invoke it; the call is idempotent today (the layout is
     // already current), but the contract must continue to function after.
     client(&env, &fixture).migrate_storage(&fixture.admin);
+    client(&env, &fixture).migrate_storage(&fixture.admin);
     let _ = lock(&env, &fixture, &fixture.user, 1_000);
 }
 
@@ -1236,4 +1246,67 @@ fn migrate_storage_keeps_bridge_functional() {
     assert_eq!(request.gross_amount, 1_000);
     assert_eq!(request.bridge_fee_applied, 3); // 30 bps on 1000
     assert_eq!(request.amount, 997);
+}
+
+#[test]
+fn migrate_storage_rewrites_legacy_requests_and_initializes_signer_state() {
+    let (env, fixture) = setup();
+    let legacy = LegacyBridgeRequest {
+        id: 1,
+        source_chain: symbol_short!("stellar"),
+        destination_chain: symbol_short!("ethereum"),
+        asset: fixture.asset.clone(),
+        amount: 997,
+        sender: fixture.user.clone(),
+        recipient: recipient_bytes(&env),
+        status: BridgeStatus::Locked,
+        created_at: 7,
+        completed_at: None,
+    };
+
+    env.as_contract(&fixture.contract_id, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::BridgeRequest(1), &legacy);
+        env.storage().instance().set(&DataKey::NextRequestId, &2u64);
+        env.storage().instance().remove(&DataKey::StorageVersion);
+        env.storage().instance().remove(&DataKey::Signers);
+        env.storage().instance().remove(&DataKey::SignerThreshold);
+    });
+
+    client(&env, &fixture).migrate_storage(&fixture.admin);
+
+    let request = client(&env, &fixture)
+        .get_bridge_request(&1)
+        .expect("legacy request should be rewritten");
+    assert_eq!(request.gross_amount, 997);
+    assert_eq!(request.amount, 997);
+    assert_eq!(request.bridge_fee_applied, 0);
+    assert_eq!(request.unlock_recipient, None);
+    assert_eq!(client(&env, &fixture).get_signers().len(), 0);
+    assert_eq!(client(&env, &fixture).get_signer_threshold(), 2);
+}
+
+#[test]
+fn lock_asset_rejects_a_stale_storage_version_before_transfer() {
+    let (env, fixture) = setup();
+    env.as_contract(&fixture.contract_id, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
+    });
+
+    let result = client(&env, &fixture).try_lock_asset(
+        &fixture.user,
+        &fixture.asset,
+        &1_000,
+        &symbol_short!("ethereum"),
+        &recipient_bytes(&env),
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidVersion)));
+    assert_eq!(
+        token(&env, &fixture.asset).balance(&fixture.user),
+        INITIAL_SUPPLY
+    );
+    assert_eq!(token(&env, &fixture.asset).balance(&fixture.contract_id), 0);
 }
