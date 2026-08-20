@@ -13,8 +13,19 @@
 
 use afri_contract_shared::{extend_instance_ttl, Error};
 use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, symbol_short, Address, Bytes, Env, Symbol,
+    contract, contracterror, contractevent, contractimpl, contracttype, symbol_short,
+    token::TokenClient, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
+
+/// Proof action byte used when signing a mint (lock leg) proof.
+const ACTION_MINT: u8 = 1;
+/// Proof action byte used when signing an unlock (burn leg) proof.
+const ACTION_UNLOCK: u8 = 2;
+/// Size of a single ECDSA signature block inside a proof: one recovery id byte
+/// followed by the 64-byte `r || s` signature.
+const SIGNATURE_BLOCK_SIZE: u32 = 65;
+/// Maximum accepted ECDSA recovery id (`0..=3`).
+const MAX_RECOVERY_ID: u32 = 3;
 
 /// Bridge request status enum.
 #[contracttype]
@@ -40,12 +51,19 @@ pub struct BridgeRequest {
     pub destination_chain: Symbol,
     /// Asset address being bridged.
     pub asset: Address,
-    /// Amount of asset to bridge (using i128 for precision).
+    /// Gross amount locked by the sender before the bridge fee is deducted.
+    pub gross_amount: i128,
+    /// Net amount released at the mint/unlock hop (`gross_amount` minus fee).
     pub amount: i128,
+    /// Bridge fee deducted from `gross_amount` (`gross_amount - amount`).
+    pub bridge_fee_applied: i128,
     /// Sender address on source chain.
     pub sender: Address,
     /// Recipient address on destination chain (stored as Bytes for cross-chain compatibility).
     pub recipient: Bytes,
+    /// Stellar address that receives the unlocked original asset on the
+    /// burn/unlock leg. `None` for outbound (lock) requests.
+    pub unlock_recipient: Option<Address>,
     /// Current status of the bridge request.
     pub status: BridgeStatus,
     /// Timestamp when the request was created.
@@ -66,10 +84,16 @@ enum DataKey {
     BridgeFee,
     /// Individual bridge request by ID.
     BridgeRequest(u64),
+    /// Accumulated bridge fees per asset, withdrawable by the admin.
+    FeesCollected(Address),
+    /// ECDSA public keys of the proof-signing oracle set (SEC-1 encoded).
+    Signers,
+    /// Minimum number of distinct signer signatures required to accept a proof.
+    SignerThreshold,
 }
 
 /// Event published when a bridge request is initiated.
-#[contractevent(topics = ["bridge"], data_format = "single-value")]
+#[contractevent(topics = ["bridge"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BridgeInitiated {
     /// Bridge request ID.
@@ -84,8 +108,12 @@ pub struct BridgeInitiated {
     /// Asset address.
     #[topic]
     pub asset: Address,
-    /// Amount.
+    /// Net amount credited to the request after the bridge fee.
     pub amount: i128,
+    /// Gross amount locked by the sender.
+    pub gross_amount: i128,
+    /// Bridge fee collected by the treasury.
+    pub fee_amount: i128,
     /// Sender address.
     #[topic]
     pub sender: Address,
@@ -146,6 +174,102 @@ pub struct BridgeFailed {
     pub reason: Symbol,
 }
 
+/// Event published when accumulated bridge fees are withdrawn.
+#[contractevent(topics = ["bridge", "fees"], data_format = "single-value")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeesWithdrawn {
+    /// Asset whose fees were withdrawn.
+    #[topic]
+    pub asset: Address,
+    /// Amount withdrawn.
+    pub amount: i128,
+    /// Treasury address that received the fees.
+    #[topic]
+    pub to: Address,
+}
+
+/// Bridge-specific error variants.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum BridgeError {
+    /// The requested fee withdrawal exceeds the collected fees for the asset.
+    InsufficientFees = 1,
+    /// A fee withdrawal was attempted by a non-admin caller.
+    FeeWithdrawalUnauthorized = 2,
+}
+
+/// Verify an ECDSA multi-signature proof against the configured oracle signer
+/// set with a minimum threshold of distinct signers.
+///
+/// The proof is a sequence of 65-byte blocks, each containing a one-byte
+/// recovery id followed by a 64-byte `r || s` signature. Every signature is
+/// recovered against `sha256(action || request_id)` and must belong to a
+/// configured signer. At least `threshold` distinct signers must be present.
+fn verify_proof(env: &Env, proof: &Bytes, action: u8, request_id: u64) -> Result<(), Error> {
+    let signers: Vec<BytesN<65>> = env
+        .storage()
+        .instance()
+        .get(&DataKey::Signers)
+        .ok_or(Error::NotInitialized)?;
+
+    let threshold: u32 = env
+        .storage()
+        .instance()
+        .get(&DataKey::SignerThreshold)
+        .unwrap_or(2);
+
+    if !proof.len().is_multiple_of(SIGNATURE_BLOCK_SIZE) {
+        return Err(Error::Unauthorized);
+    }
+    let num_sigs = proof.len() / SIGNATURE_BLOCK_SIZE;
+    if num_sigs < threshold {
+        return Err(Error::Unauthorized);
+    }
+
+    let mut msg = [0u8; 9];
+    msg[0] = action;
+    msg[1..].copy_from_slice(&request_id.to_be_bytes());
+    let digest = env.crypto().sha256(&Bytes::from_array(env, &msg));
+
+    // Track which signer slots matched so duplicate signatures count once.
+    let mut matched: Vec<bool> = Vec::new(env);
+    for _ in 0..signers.len() {
+        matched.push_back(false);
+    }
+
+    for i in 0..num_sigs {
+        let offset = i * SIGNATURE_BLOCK_SIZE;
+        let recovery_id = proof.get(offset).unwrap() as u32;
+        if recovery_id > MAX_RECOVERY_ID {
+            return Err(Error::Unauthorized);
+        }
+        let signature =
+            BytesN::<64>::try_from(proof.slice(offset + 1..offset + SIGNATURE_BLOCK_SIZE))
+                .map_err(|_| Error::Unauthorized)?;
+        let recovered = env
+            .crypto()
+            .secp256k1_recover(&digest, &signature, recovery_id);
+        for j in 0..signers.len() {
+            if signers.get(j).unwrap() == recovered && !matched.get(j).unwrap() {
+                matched.set(j, true);
+            }
+        }
+    }
+
+    let mut count: u32 = 0;
+    for i in 0..matched.len() {
+        if matched.get(i).unwrap() {
+            count += 1;
+        }
+    }
+    if count < threshold {
+        return Err(Error::Unauthorized);
+    }
+
+    Ok(())
+}
+
 #[contract]
 pub struct BridgeContract;
 
@@ -175,10 +299,16 @@ impl BridgeContract {
 
     /// Lock assets on the source chain for cross-chain transfer.
     ///
+    /// The full `amount` is transferred from `caller` into the contract. The
+    /// bridge fee is deducted and tracked in `FeesCollected`, while the net
+    /// amount is recorded on the request and released to the wrapped-asset
+    /// minter at the mint hop.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
+    /// * `caller` - The account locking the assets (authorized via `require_auth`).
     /// * `asset` - The asset address to lock.
-    /// * `amount` - The amount to lock.
+    /// * `amount` - The gross amount to lock.
     /// * `destination_chain` - The destination chain identifier.
     /// * `recipient` - The recipient address on the destination chain (hex encoded).
     ///
@@ -186,6 +316,7 @@ impl BridgeContract {
     /// * `u64` - The bridge request ID.
     pub fn lock_asset(
         env: Env,
+        caller: Address,
         asset: Address,
         amount: i128,
         destination_chain: Symbol,
@@ -200,6 +331,8 @@ impl BridgeContract {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
+
+        caller.require_auth();
 
         let next_id: u64 = env
             .storage()
@@ -216,16 +349,31 @@ impl BridgeContract {
         let fee_amount = (amount * bridge_fee as i128) / 10000;
         let net_amount = amount - fee_amount;
 
-        let sender = env.current_contract_address();
+        // Pull the full gross amount into the contract; the fee stays with the
+        // contract as treasury, the net is owed to the wrapped-asset minter.
+        TokenClient::new(&env, &asset).transfer(&caller, env.current_contract_address(), &amount);
+
+        let collected: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeesCollected(asset.clone()))
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DataKey::FeesCollected(asset.clone()),
+            &(collected + fee_amount),
+        );
 
         let request = BridgeRequest {
             id: next_id,
             source_chain: symbol_short!("stellar"),
             destination_chain,
             asset: asset.clone(),
+            gross_amount: amount,
             amount: net_amount,
-            sender: sender.clone(),
+            bridge_fee_applied: fee_amount,
+            sender: caller.clone(),
             recipient,
+            unlock_recipient: None,
             status: BridgeStatus::Locked,
             created_at: env.ledger().timestamp(),
             completed_at: None,
@@ -241,31 +389,40 @@ impl BridgeContract {
 
         extend_instance_ttl(&env);
 
-        // Emit event
+        // Emit event with both gross and net amounts.
         BridgeInitiated {
             request_id: next_id,
             source_chain: symbol_short!("stellar"),
             destination_chain: request.destination_chain.clone(),
             asset,
             amount: net_amount,
-            sender,
+            gross_amount: amount,
+            fee_amount,
+            sender: caller,
         }
         .publish(&env);
 
         Ok(next_id)
     }
 
-    /// Mint wrapped assets on the destination chain.
+    /// Release the locked (net) amount to the wrapped-asset minter on the
+    /// destination chain after a valid multi-signature proof is supplied.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `bridge_request_id` - The bridge request ID.
-    /// * `proof` - Transaction proof for verification.
+    /// * `proof` - ECDSA multi-signature proof for verification.
+    /// * `wrapped_asset_issuer` - Address that mints the wrapped asset on the
+    ///   destination chain and holds the released collateral.
     ///
     /// # Returns
     /// * `Ok(())` on successful minting.
-    /// * `Err(Error::NotInitialized)` if contract not initialized.
-    pub fn mint_wrapped(env: Env, bridge_request_id: u64, proof: Bytes) -> Result<(), Error> {
+    pub fn mint_wrapped(
+        env: Env,
+        bridge_request_id: u64,
+        proof: Bytes,
+        wrapped_asset_issuer: Address,
+    ) -> Result<(), Error> {
         let mut request: BridgeRequest = env
             .storage()
             .instance()
@@ -276,9 +433,15 @@ impl BridgeContract {
             return Err(Error::Unauthorized);
         }
 
-        if proof.is_empty() {
-            return Err(Error::Unauthorized);
-        }
+        verify_proof(&env, &proof, ACTION_MINT, bridge_request_id)?;
+
+        // Release the net amount to the wrapped-asset minter, which holds it
+        // as collateral for the wrapped tokens minted on the destination chain.
+        TokenClient::new(&env, &request.asset).transfer(
+            &env.current_contract_address(),
+            &wrapped_asset_issuer,
+            &request.amount,
+        );
 
         request.status = BridgeStatus::Minted;
         request.completed_at = Some(env.ledger().timestamp());
@@ -299,23 +462,28 @@ impl BridgeContract {
         Ok(())
     }
 
-    /// Burn wrapped assets on the destination chain to unlock original assets.
+    /// Initiate the return leg: deposit wrapped tokens into the contract and
+    /// record a burn request whose original asset can later be unlocked.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `asset` - The wrapped asset address to burn.
+    /// * `caller` - The account burning the wrapped tokens (authorized via `require_auth`).
+    /// * `asset` - The original asset to unlock on the source chain.
+    /// * `wrapped_token` - The wrapped asset being deposited/burned.
     /// * `amount` - The amount to burn.
-    /// * `source_chain` - The source chain identifier.
-    /// * `recipient` - The recipient address on the source chain (hex encoded).
+    /// * `source_chain` - The destination chain identifier the burn originated from.
+    /// * `recipient` - The Stellar address that will receive the unlocked original asset.
     ///
     /// # Returns
     /// * `u64` - The new bridge request ID for unlocking.
     pub fn burn_wrapped(
         env: Env,
+        caller: Address,
         asset: Address,
+        wrapped_token: Address,
         amount: i128,
         source_chain: Symbol,
-        recipient: Bytes,
+        recipient: Address,
     ) -> Result<u64, Error> {
         if amount <= 0 {
             return Err(Error::Unauthorized);
@@ -327,22 +495,33 @@ impl BridgeContract {
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)?;
 
+        caller.require_auth();
+
         let next_id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextRequestId)
             .unwrap_or(1);
 
-        let sender = env.current_contract_address();
+        // Deposit the wrapped tokens into the contract, retiring them from
+        // circulation until the original asset is unlocked.
+        TokenClient::new(&env, &wrapped_token).transfer(
+            &caller,
+            env.current_contract_address(),
+            &amount,
+        );
 
         let request = BridgeRequest {
             id: next_id,
             source_chain,
             destination_chain: symbol_short!("stellar"),
-            asset,
+            asset: asset.clone(),
+            gross_amount: amount,
             amount,
-            sender: sender.clone(),
-            recipient,
+            bridge_fee_applied: 0,
+            sender: caller.clone(),
+            recipient: Bytes::new(&env),
+            unlock_recipient: Some(recipient.clone()),
             status: BridgeStatus::Burned,
             created_at: env.ledger().timestamp(),
             completed_at: None,
@@ -368,16 +547,16 @@ impl BridgeContract {
         Ok(next_id)
     }
 
-    /// Unlock original assets on the source chain after proof verification.
+    /// Unlock original assets to the burn request's recipient after a valid
+    /// multi-signature proof is supplied.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `bridge_request_id` - The bridge request ID.
-    /// * `proof` - Transaction proof for verification.
+    /// * `proof` - ECDSA multi-signature proof for verification.
     ///
     /// # Returns
     /// * `Ok(())` on successful unlocking.
-    /// * `Err(Error::NotInitialized)` if contract not initialized.
     pub fn unlock_asset(env: Env, bridge_request_id: u64, proof: Bytes) -> Result<(), Error> {
         let mut request: BridgeRequest = env
             .storage()
@@ -389,9 +568,20 @@ impl BridgeContract {
             return Err(Error::Unauthorized);
         }
 
-        if proof.is_empty() {
-            return Err(Error::Unauthorized);
-        }
+        verify_proof(&env, &proof, ACTION_UNLOCK, bridge_request_id)?;
+
+        let unlock_recipient: Address = request
+            .unlock_recipient
+            .clone()
+            .ok_or(Error::Unauthorized)?;
+
+        // Release the stored net amount to the recipient from the contract's
+        // pooled balance of the original asset.
+        TokenClient::new(&env, &request.asset).transfer(
+            &env.current_contract_address(),
+            &unlock_recipient,
+            &request.amount,
+        );
 
         request.status = BridgeStatus::Unlocked;
         request.completed_at = Some(env.ledger().timestamp());
@@ -412,6 +602,61 @@ impl BridgeContract {
         Ok(())
     }
 
+    /// Withdraw accumulated bridge fees for an asset to a treasury address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The administrator address (authorized via `require_auth`).
+    /// * `asset` - The asset whose collected fees are withdrawn.
+    /// * `to` - The treasury address that receives the fees.
+    /// * `amount` - The fee amount to withdraw.
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful withdrawal.
+    pub fn withdraw_fees(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), BridgeError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(BridgeError::FeeWithdrawalUnauthorized)?;
+        if admin != stored_admin {
+            return Err(BridgeError::FeeWithdrawalUnauthorized);
+        }
+        admin.require_auth();
+
+        if amount <= 0 {
+            return Err(BridgeError::InsufficientFees);
+        }
+
+        let collected: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::FeesCollected(asset.clone()))
+            .unwrap_or(0);
+        if collected < amount {
+            return Err(BridgeError::InsufficientFees);
+        }
+
+        env.storage().instance().set(
+            &DataKey::FeesCollected(asset.clone()),
+            &(collected - amount),
+        );
+
+        TokenClient::new(&env, &asset).transfer(&env.current_contract_address(), &to, &amount);
+
+        extend_instance_ttl(&env);
+
+        FeesWithdrawn { asset, amount, to }.publish(&env);
+
+        Ok(())
+    }
+
     /// Set the bridge fee percentage (basis points).
     ///
     /// # Arguments
@@ -420,7 +665,6 @@ impl BridgeContract {
     ///
     /// # Returns
     /// * `Ok(())` on successful update.
-    /// * `Err(Error::NotInitialized)` if contract not initialized.
     /// * `Err(Error::Unauthorized)` if caller is not admin.
     pub fn set_bridge_fee(env: Env, fee_percentage: u32) -> Result<(), Error> {
         let admin: Address = env
@@ -434,6 +678,49 @@ impl BridgeContract {
         env.storage()
             .instance()
             .set(&DataKey::BridgeFee, &fee_percentage);
+
+        extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    /// Configure the ECDSA public keys of the proof-signing oracle set and the
+    /// minimum distinct-signer threshold.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The administrator address (authorized via `require_auth`).
+    /// * `signers` - SEC-1 encoded (uncompressed, 65-byte) signer public keys.
+    /// * `threshold` - Minimum distinct signers required to accept a proof.
+    ///
+    /// # Returns
+    /// * `Ok(())` on successful update.
+    /// * `Err(Error::InvalidAmount)` if the signer set or threshold is invalid.
+    /// * `Err(Error::Unauthorized)` if caller is not admin.
+    pub fn set_signers(
+        env: Env,
+        admin: Address,
+        signers: Vec<BytesN<65>>,
+        threshold: u32,
+    ) -> Result<(), Error> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        admin.require_auth();
+
+        if signers.is_empty() || threshold == 0 || threshold > signers.len() {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage().instance().set(&DataKey::Signers, &signers);
+        env.storage()
+            .instance()
+            .set(&DataKey::SignerThreshold, &threshold);
 
         extend_instance_ttl(&env);
 
@@ -466,6 +753,49 @@ impl BridgeContract {
             .instance()
             .get(&DataKey::BridgeFee)
             .unwrap_or(30)
+    }
+
+    /// Get the collected fees for an asset.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `asset` - The asset address.
+    ///
+    /// # Returns
+    /// * `i128` - Accumulated bridge fees for the asset.
+    pub fn get_collected_fees(env: Env, asset: Address) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeesCollected(asset))
+            .unwrap_or(0)
+    }
+
+    /// Get the configured proof-signing oracle set.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<65>>` - The configured signer public keys.
+    pub fn get_signers(env: Env) -> Vec<BytesN<65>> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Signers)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Get the configured proof-signer threshold.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Returns
+    /// * `u32` - Minimum distinct signers required to accept a proof.
+    pub fn get_signer_threshold(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SignerThreshold)
+            .unwrap_or(2)
     }
 }
 
