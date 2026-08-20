@@ -42,7 +42,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
     let input = input.strip_prefix("0x").unwrap_or(input);
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         return Err(format!("odd-length hex string: {input}"));
     }
     (0..input.len())
@@ -86,10 +86,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("gen") => {
-            let count: usize = args
-                .get(1)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(3);
+            let count: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(3);
             println!("# Oracle signer set");
             for i in 0..count {
                 let key = SigningKey::random(&mut OsRng);
