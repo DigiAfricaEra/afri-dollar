@@ -341,7 +341,7 @@ fn verify_proof(
         return Err(Error::Unauthorized);
     }
     let num_sigs = proof.len() / SIGNATURE_BLOCK_SIZE;
-    if num_sigs < threshold {
+    if num_sigs < threshold || num_sigs > signers.len() {
         return Err(Error::Unauthorized);
     }
 

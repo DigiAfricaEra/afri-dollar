@@ -3,6 +3,7 @@ extern crate std;
 use crate::{
     proof_digest, BridgeContract, BridgeContractClient, BridgeError, BridgeInitiated,
     BridgeRequest, BridgeStatus, DataKey, LegacyBridgeRequest, ACTION_MINT, ACTION_UNLOCK,
+    SIGNATURE_BLOCK_SIZE,
 };
 use afri_contract_shared::Error;
 use k256::ecdsa::SigningKey;
@@ -1027,6 +1028,19 @@ fn mint_wrapped_rejects_invalid_signature_payload() {
     bogus.extend_from_array(&[0u8; 64]); // second signature
 
     let result = client(&env, &fixture).try_mint_wrapped(&request_id, &bogus, &fixture.issuer);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
+/// A proof cannot contain more signature blocks than the configured signer
+/// set, because extra blocks can never contribute to the threshold.
+#[test]
+fn mint_wrapped_rejects_more_signatures_than_configured() {
+    let (env, fixture) = setup();
+    let request_id = lock(&env, &fixture, &fixture.user, 10_000);
+    const OVERLONG_PROOF_LENGTH: usize = SIGNATURE_BLOCK_SIZE as usize * 4;
+    let proof = Bytes::from_array(&env, &[0u8; OVERLONG_PROOF_LENGTH]);
+
+    let result = client(&env, &fixture).try_mint_wrapped(&request_id, &proof, &fixture.issuer);
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
