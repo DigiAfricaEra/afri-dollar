@@ -8,6 +8,8 @@ import prisma from '../config/database';
 import { AppError, InvalidCredentialsError } from '../types';
 import type { RegisterRequest, TokenRefreshData, LoginRequest, JwtPayload } from '../types';
 
+import { NotificationService } from './notification.service';
+
 const SALT_ROUNDS = 12;
 const ACCESS_TOKEN_EXPIRY = '15m';
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
@@ -177,6 +179,13 @@ export const AuthService = {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { passwordHash: _pw, ...userWithoutPassword } = updatedUser;
 
+    // Notify the user of a new login session (fire-and-forget; never blocks auth)
+    void NotificationService.notify(user.id, 'security-alert', {
+      activity: `New login${deviceInfo ? ` from ${deviceInfo}` : ''}`,
+    }).catch((err: unknown) => {
+      console.error('[AuthService] Failed to send login notification:', err);
+    });
+
     return {
       user: userWithoutPassword,
       tokens: { accessToken, refreshToken },
@@ -241,6 +250,13 @@ export const AuthService = {
         deviceInfo: tokenRecord.deviceInfo,
         expiresAt: addDays(new Date(), REFRESH_TOKEN_EXPIRY_DAYS),
       },
+    });
+
+    // Notify the user of the refreshed session (fire-and-forget; never blocks auth)
+    void NotificationService.notify(tokenRecord.userId, 'security-alert', {
+      activity: 'Session refreshed from a known device',
+    }).catch((err: unknown) => {
+      console.error('[AuthService] Failed to send refresh notification:', err);
     });
 
     return { accessToken, refreshToken: newRefreshToken, userId: tokenRecord.userId };

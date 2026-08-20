@@ -58,6 +58,19 @@ enum ReportStatus {
   failed
 }
 
+enum NotificationChannel {
+  email
+  sms
+  push
+}
+
+enum NotificationStatus {
+  pending
+  sent
+  delivered
+  failed
+}
+
 // User model for authentication and authorization
 model User {
   id            String      @id @default(cuid())
@@ -84,6 +97,9 @@ model User {
   reportRequests    ReportRequest[]
   complianceAlerts  ComplianceAlert[]
   webhookConfigs    WebhookConfig[]
+  notifications     Notification[]
+  notificationPreference NotificationPreference?
+  pushSubscriptions PushSubscription[]
 
   @@index([email])
   @@index([walletAddress])
@@ -475,4 +491,54 @@ model WebhookDelivery {
   @@index([status])
   @@index([nextRetryAt])
   @@index([webhookId, createdAt])
+}
+
+// Delivery record for a notification dispatched to a user
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String              // 'transaction-completed', 'security-alert', etc.
+  channel   NotificationChannel // delivery channel: 'email' | 'sms' | 'push'
+  template  String              // template id used to render the message
+  data      Json
+  status    NotificationStatus  @default(pending)
+  sentAt    DateTime?
+  readAt    DateTime?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  @@index([userId, createdAt])
+  @@index([userId, status])
+}
+
+// Per-user channel and category toggles for notifications
+model NotificationPreference {
+  userId            String   @id
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  email             Boolean  @default(true)
+  sms               Boolean  @default(true)
+  push              Boolean  @default(true)
+  transactionAlerts Boolean  @default(true)
+  securityAlerts    Boolean  @default(true)
+  payrollAlerts     Boolean  @default(true)
+  marketing         Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// Web push subscription registered by a user's device
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String
+  p256dh    String
+  auth      String
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, endpoint])
+  @@index([userId])
 }

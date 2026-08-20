@@ -21,6 +21,7 @@ import auditRouter from './routes/audit.routes';
 import authRouter from './routes/auth.routes';
 import fxRouter, { adminFxRouter } from './routes/fx.routes';
 import jobRouter from './routes/job.routes';
+import notificationRouter from './routes/notification.routes';
 import paymentRouter from './routes/payment.routes';
 import payrollRouter from './routes/payroll.routes';
 import reportRouter from './routes/report.routes';
@@ -118,6 +119,9 @@ app.use('/api/v1/reports', reportRouter as MountableRouter);
 
 // Webhook routes
 app.use('/api/v1/webhooks', webhookRouter as MountableRouter);
+
+// Notification routes
+app.use('/api/v1/notifications', notificationRouter as MountableRouter);
 
 // Global error handler
 app.use(errorMiddleware);

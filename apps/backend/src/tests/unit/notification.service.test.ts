@@ -1,5 +1,46 @@
 /* eslint-disable */
-import { NotificationService } from '../../services/notification.service';
+import { lookup as dnsLookup } from 'node:dns';
+import { lookup } from 'node:dns/promises';
+
+import prisma from '../../config/database';
+import {
+  createPublicEndpointAgent,
+  NotificationService,
+} from '../../services/notification.service';
+
+jest.mock('node:dns', () => ({
+  lookup: jest.fn(),
+}));
+
+jest.mock('node:dns/promises', () => ({
+  lookup: jest.fn().mockResolvedValue([{ address: '8.8.8.8', family: 4 }]),
+}));
+
+jest.mock('../../config/database', () => ({
+  __esModule: true,
+  default: {
+    user: {
+      findUnique: jest.fn(),
+    },
+    notification: {
+      create: jest.fn(),
+      update: jest.fn(),
+      findMany: jest.fn(),
+      count: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    notificationPreference: {
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      upsert: jest.fn(),
+    },
+    pushSubscription: {
+      findMany: jest.fn(),
+      upsert: jest.fn(),
+      deleteMany: jest.fn(),
+    },
+  },
+}));
 
 // Mock external SDKs so tests don't require real credentials
 jest.mock('@sendgrid/mail', () => ({
@@ -20,12 +61,77 @@ jest.mock('web-push', () => ({
   sendNotification: jest.fn().mockResolvedValue({}),
 }));
 
+const mockUserFindUnique = prisma.user.findUnique as jest.Mock;
+const mockNotificationCreate = prisma.notification.create as jest.Mock;
+const mockNotificationUpdate = prisma.notification.update as jest.Mock;
+const mockNotificationFindMany = prisma.notification.findMany as jest.Mock;
+const mockNotificationCount = prisma.notification.count as jest.Mock;
+const mockNotificationUpdateMany = prisma.notification.updateMany as jest.Mock;
+const mockPreferenceUpsert = prisma.notificationPreference.upsert as jest.Mock;
+const mockPushSubFindMany = prisma.pushSubscription.findMany as jest.Mock;
+const mockPushSubUpsert = prisma.pushSubscription.upsert as jest.Mock;
+const mockPushSubDeleteMany = prisma.pushSubscription.deleteMany as jest.Mock;
+const mockLookup = lookup as jest.Mock;
+const mockDnsLookup = dnsLookup as unknown as jest.Mock;
+
+function prefsRow(
+  userId: string,
+  overrides: Partial<{
+    email: boolean;
+    sms: boolean;
+    push: boolean;
+    transactionAlerts: boolean;
+    securityAlerts: boolean;
+    payrollAlerts: boolean;
+    marketing: boolean;
+  }> = {}
+) {
+  return {
+    userId,
+    email: true,
+    sms: true,
+    push: true,
+    transactionAlerts: true,
+    securityAlerts: true,
+    payrollAlerts: true,
+    marketing: false,
+    ...overrides,
+  };
+}
+
+function notifRow(
+  userId: string,
+  channel: string,
+  type: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    id: `notif-${channel}-${Date.now()}`,
+    userId,
+    type,
+    channel,
+    template: type,
+    data: {},
+    status: 'pending',
+    sentAt: null,
+    readAt: null,
+    createdAt: new Date(),
+    ...overrides,
+  };
+}
+
 describe('NotificationService', () => {
   beforeEach(() => {
-    // Clear in-memory stores between tests
-    NotificationService._notificationStore.length = 0;
-    NotificationService._preferencesStore.clear();
     jest.clearAllMocks();
+
+    mockUserFindUnique.mockResolvedValue({ email: 'user@test.com', phoneNumber: null });
+    mockPreferenceUpsert.mockResolvedValue(prefsRow('default-user'));
+    mockPushSubFindMany.mockResolvedValue([]);
+    mockNotificationCreate.mockResolvedValue(notifRow('default-user', 'email', 'kyc-approved'));
+    mockNotificationUpdate.mockResolvedValue({});
+    mockNotificationFindMany.mockResolvedValue([]);
+    mockNotificationCount.mockResolvedValue(0);
+    mockNotificationUpdateMany.mockResolvedValue({ count: 0 });
   });
 
   // -------------------------------------------------------------------------
@@ -191,11 +297,69 @@ describe('NotificationService', () => {
         'public-key',
         'private-key'
       );
-      expect(webpush.sendNotification).toHaveBeenCalledWith(mockSubscription, expect.any(String));
+      expect(webpush.sendNotification).toHaveBeenCalledWith(
+        mockSubscription,
+        expect.any(String),
+        expect.objectContaining({ agent: expect.any(Object) })
+      );
 
       delete process.env.VAPID_SUBJECT;
       delete process.env.VAPID_PUBLIC_KEY;
       delete process.env.VAPID_PRIVATE_KEY;
+    });
+
+    it('should reject a push notification to a multicast endpoint (225.0.0.1)', async () => {
+      process.env.VAPID_SUBJECT = 'mailto:test@test.com';
+      process.env.VAPID_PUBLIC_KEY = 'public-key';
+      process.env.VAPID_PRIVATE_KEY = 'private-key';
+
+      await expect(
+        NotificationService.sendPush(
+          {
+            endpoint: 'https://225.0.0.1/send',
+            keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+          },
+          { title: 'Test' }
+        )
+      ).rejects.toThrow('Invalid push subscription');
+
+      delete process.env.VAPID_SUBJECT;
+      delete process.env.VAPID_PUBLIC_KEY;
+      delete process.env.VAPID_PRIVATE_KEY;
+    });
+
+    it('should reject DNS rebinding to an internal address at connect time', (done) => {
+      mockDnsLookup.mockImplementation(
+        (
+          _hostname: string,
+          _options: { all?: boolean },
+          callback: (
+            err: Error | null,
+            addresses?: Array<{ address: string; family: number }>
+          ) => void
+        ) => {
+          callback(null, [{ address: '10.0.0.5', family: 4 }]);
+        }
+      );
+
+      const agent = createPublicEndpointAgent();
+      const agentLookup = (
+        agent as unknown as {
+          options: {
+            lookup: (
+              hostname: string,
+              options: { all?: boolean },
+              callback: (err: Error | null, ...rest: unknown[]) => void
+            ) => void;
+          };
+        }
+      ).options.lookup;
+
+      agentLookup('push.internal.test', { all: true }, (err) => {
+        expect(err).toBeDefined();
+        expect(err?.message).toBe('Invalid push subscription');
+        done();
+      });
     });
   });
 
@@ -203,8 +367,16 @@ describe('NotificationService', () => {
   // Preferences
   // -------------------------------------------------------------------------
   describe('getPreferences', () => {
-    it('should return default preferences for a new user', async () => {
+    it('should return default preferences and persist them for a new user', async () => {
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-new'));
+
       const prefs = await NotificationService.getPreferences('user-new');
+
+      expect(mockPreferenceUpsert).toHaveBeenCalledWith({
+        where: { userId: 'user-new' },
+        update: {},
+        create: { userId: 'user-new' },
+      });
       expect(prefs.userId).toBe('user-new');
       expect(prefs.email).toBe(true);
       expect(prefs.sms).toBe(true);
@@ -214,15 +386,53 @@ describe('NotificationService', () => {
       expect(prefs.payrollAlerts).toBe(true);
       expect(prefs.marketing).toBe(false);
     });
+
+    it('should return existing preferences without creating new ones', async () => {
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-existing', { email: false }));
+
+      const prefs = await NotificationService.getPreferences('user-existing');
+
+      expect(mockPreferenceUpsert).toHaveBeenCalledWith({
+        where: { userId: 'user-existing' },
+        update: {},
+        create: { userId: 'user-existing' },
+      });
+      expect(prefs.email).toBe(false);
+    });
+
+    it('should handle concurrent first access without a unique-key failure', async () => {
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-concurrent'));
+
+      const [first, second] = await Promise.all([
+        NotificationService.getPreferences('user-concurrent'),
+        NotificationService.getPreferences('user-concurrent'),
+      ]);
+
+      expect(first.userId).toBe('user-concurrent');
+      expect(second.userId).toBe('user-concurrent');
+      expect(mockPreferenceUpsert).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe('updatePreferences', () => {
-    it('should update notification preferences', async () => {
+    it('should update notification preferences via upsert', async () => {
+      mockPreferenceUpsert.mockResolvedValue(
+        prefsRow('user-1', { email: false, payrollAlerts: false, marketing: true })
+      );
+
       const updated = await NotificationService.updatePreferences('user-1', {
         email: false,
         payrollAlerts: false,
         marketing: true,
       });
+
+      expect(mockPreferenceUpsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'user-1' },
+          update: expect.objectContaining({ email: false, payrollAlerts: false, marketing: true }),
+          create: expect.objectContaining({ userId: 'user-1' }),
+        })
+      );
       expect(updated.email).toBe(false);
       expect(updated.payrollAlerts).toBe(false);
       expect(updated.marketing).toBe(true);
@@ -230,14 +440,11 @@ describe('NotificationService', () => {
     });
 
     it('should persist updated preferences', async () => {
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-2', { push: false }));
+
       await NotificationService.updatePreferences('user-2', { push: false });
       const prefs = await NotificationService.getPreferences('user-2');
       expect(prefs.push).toBe(false);
-    });
-
-    it('should always keep the userId field correct', async () => {
-      const updated = await NotificationService.updatePreferences('user-3', { sms: false });
-      expect(updated.userId).toBe('user-3');
     });
   });
 
@@ -245,41 +452,82 @@ describe('NotificationService', () => {
   // notify
   // -------------------------------------------------------------------------
   describe('notify', () => {
-    it('should record a notification in the store', async () => {
+    it('should persist a notification row per enabled channel', async () => {
+      process.env.SENDGRID_API_KEY = 'SG.test-key';
+      process.env.SENDGRID_FROM_EMAIL = 'noreply@test.com';
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-100', { sms: false, push: false }));
+
       await NotificationService.notify('user-100', 'kyc-approved', {
         email: 'alice@test.com',
         firstName: 'Alice',
       });
-      const notifs = await NotificationService.getNotifications('user-100');
-      expect(notifs.length).toBeGreaterThan(0);
-      expect(notifs[0].userId).toBe('user-100');
-      expect(notifs[0].template).toBe('kyc-approved');
+
+      expect(mockNotificationCreate).toHaveBeenCalledTimes(1);
+      expect(mockNotificationCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId: 'user-100',
+            type: 'kyc-approved',
+            channel: 'email',
+            template: 'kyc-approved',
+            status: 'pending',
+          }),
+        })
+      );
+      // Delivered row updated to sent
+      expect(mockNotificationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'sent' }),
+        })
+      );
+
+      delete process.env.SENDGRID_API_KEY;
+    });
+
+    it('should mark notification as failed when the provider is not configured', async () => {
+      delete process.env.SENDGRID_API_KEY;
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-800', { sms: false, push: false }));
+
+      await NotificationService.notify('user-800', 'kyc-approved', {
+        email: 'provider-absent@test.com',
+        firstName: 'Alice',
+      });
+
+      expect(mockNotificationCreate).toHaveBeenCalledTimes(1);
+      expect(mockNotificationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'failed' }),
+        })
+      );
     });
 
     it('should not send transaction alerts when disabled in preferences', async () => {
-      await NotificationService.updatePreferences('user-200', { transactionAlerts: false });
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-200', { transactionAlerts: false }));
+
       await NotificationService.notify('user-200', 'transaction-completed', {
         amount: '50',
         currency: 'USD',
         transactionId: 'tx-abc',
         email: 'bob@test.com',
       });
-      const notifs = await NotificationService.getNotifications('user-200');
-      expect(notifs).toHaveLength(0);
+
+      expect(mockNotificationCreate).not.toHaveBeenCalled();
     });
 
     it('should not send security alerts when disabled in preferences', async () => {
-      await NotificationService.updatePreferences('user-300', { securityAlerts: false });
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-300', { securityAlerts: false }));
+
       await NotificationService.notify('user-300', 'security-alert', {
         activity: 'login from new device',
         email: 'carol@test.com',
       });
-      const notifs = await NotificationService.getNotifications('user-300');
-      expect(notifs).toHaveLength(0);
+
+      expect(mockNotificationCreate).not.toHaveBeenCalled();
     });
 
     it('should not send payroll alerts when disabled in preferences', async () => {
-      await NotificationService.updatePreferences('user-350', { payrollAlerts: false });
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-350', { payrollAlerts: false }));
+
       await NotificationService.notify('user-350', 'payroll-processed', {
         batchName: 'July Salary',
         count: '10',
@@ -287,67 +535,338 @@ describe('NotificationService', () => {
         currency: 'USD',
         email: 'payroll@test.com',
       });
-      const notifs = await NotificationService.getNotifications('user-350');
-      expect(notifs).toHaveLength(0);
+
+      expect(mockNotificationCreate).not.toHaveBeenCalled();
     });
 
-    it('should not send email notifications when email is disabled', async () => {
-      process.env.SENDGRID_API_KEY = 'SG.test-key';
-      await NotificationService.updatePreferences('user-400', {
-        email: false,
-        sms: false,
-        push: false,
-      });
+    it('should not persist anything when all channels are disabled', async () => {
+      mockPreferenceUpsert.mockResolvedValue(
+        prefsRow('user-400', { email: false, sms: false, push: false })
+      );
+
       await NotificationService.notify('user-400', 'transaction-completed', {
         amount: '20',
         currency: 'USD',
         transactionId: 'tx-xyz',
         email: 'dave@test.com',
       });
-      const notifs = await NotificationService.getNotifications('user-400');
-      expect(notifs).toHaveLength(0);
-      delete process.env.SENDGRID_API_KEY;
+
+      expect(mockNotificationCreate).not.toHaveBeenCalled();
     });
 
     it('should mark notification as failed when recipient info is missing', async () => {
-      await NotificationService.updatePreferences('user-500', { sms: false, push: false });
-      // No email key in data -> channel will fail
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-500', { sms: false, push: false }));
+      mockUserFindUnique.mockResolvedValue({ email: null, phoneNumber: null });
+
       await NotificationService.notify('user-500', 'kyc-approved', { firstName: 'Eve' });
-      const notifs = await NotificationService.getNotifications('user-500');
-      expect(notifs.some((n) => n.status === 'failed')).toBe(true);
+
+      expect(mockNotificationCreate).toHaveBeenCalledTimes(1);
+      expect(mockNotificationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'failed' }),
+        })
+      );
+    });
+
+    it('should fall back to the stored user email/phone when not provided', async () => {
+      mockPreferenceUpsert.mockResolvedValue(prefsRow('user-700', { sms: true, push: false }));
+      mockUserFindUnique.mockResolvedValue({
+        email: 'stored@test.com',
+        phoneNumber: '+1111111111',
+      });
+
+      await NotificationService.notify('user-700', 'security-alert', { activity: 'new login' });
+
+      expect(mockNotificationCreate).toHaveBeenCalledTimes(2); // email + sms
+    });
+
+    it('should mark push as sent when at least one subscription delivers', async () => {
+      process.env.VAPID_SUBJECT = 'mailto:test@test.com';
+      process.env.VAPID_PUBLIC_KEY = 'public-key';
+      process.env.VAPID_PRIVATE_KEY = 'private-key';
+
+      const webpush = require('web-push');
+      (webpush.sendNotification as jest.Mock)
+        .mockRejectedValueOnce(new Error('subscription 1 failed'))
+        .mockResolvedValueOnce({});
+
+      mockPreferenceUpsert.mockResolvedValue(
+        prefsRow('user-pushmix', { email: false, sms: false })
+      );
+      mockPushSubFindMany.mockResolvedValue([
+        {
+          id: 'sub-1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/a',
+          p256dh: 'p256dh-a',
+          auth: 'auth-a',
+        },
+        {
+          id: 'sub-2',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/b',
+          p256dh: 'p256dh-b',
+          auth: 'auth-b',
+        },
+      ]);
+
+      await NotificationService.notify('user-pushmix', 'kyc-approved', { firstName: 'Alice' });
+
+      expect(mockNotificationCreate).toHaveBeenCalledTimes(1);
+      expect(mockNotificationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'sent' }),
+        })
+      );
+
+      delete process.env.VAPID_SUBJECT;
+      delete process.env.VAPID_PUBLIC_KEY;
+      delete process.env.VAPID_PRIVATE_KEY;
+    });
+
+    it('should mark push as failed when every subscription delivery fails', async () => {
+      process.env.VAPID_SUBJECT = 'mailto:test@test.com';
+      process.env.VAPID_PUBLIC_KEY = 'public-key';
+      process.env.VAPID_PRIVATE_KEY = 'private-key';
+
+      const webpush = require('web-push');
+      (webpush.sendNotification as jest.Mock).mockRejectedValue(new Error('all failed'));
+
+      mockPreferenceUpsert.mockResolvedValue(
+        prefsRow('user-pushfail', { email: false, sms: false })
+      );
+      mockPushSubFindMany.mockResolvedValue([
+        {
+          id: 'sub-1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/a',
+          p256dh: 'p256dh-a',
+          auth: 'auth-a',
+        },
+      ]);
+
+      await NotificationService.notify('user-pushfail', 'kyc-approved', { firstName: 'Alice' });
+
+      expect(mockNotificationUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'failed' }),
+        })
+      );
+
+      delete process.env.VAPID_SUBJECT;
+      delete process.env.VAPID_PUBLIC_KEY;
+      delete process.env.VAPID_PRIVATE_KEY;
     });
 
     it('should return early for an unknown notification type', async () => {
-      // Cast to bypass TS type check for test
       await expect(
         NotificationService.notify('user-600', 'unknown-type' as any, {})
       ).resolves.toBeUndefined();
-      const notifs = await NotificationService.getNotifications('user-600');
-      expect(notifs).toHaveLength(0);
+      expect(mockNotificationCreate).not.toHaveBeenCalled();
     });
   });
 
   // -------------------------------------------------------------------------
-  // getNotifications (delivery tracking)
+  // getNotifications (pagination + unread filter)
   // -------------------------------------------------------------------------
   describe('getNotifications', () => {
-    it('should return empty array for user with no notifications', async () => {
-      const notifs = await NotificationService.getNotifications('user-no-notifs');
-      expect(notifs).toEqual([]);
+    it('should return empty list for user with no notifications', async () => {
+      mockNotificationFindMany.mockResolvedValue([]);
+      mockNotificationCount.mockResolvedValue(0);
+
+      const result = await NotificationService.getNotifications('user-no-notifs');
+
+      expect(result.notifications).toEqual([]);
+      expect(result.total).toBe(0);
     });
 
-    it('should only return notifications for the specified user', async () => {
-      await NotificationService.notify('user-A', 'kyc-approved', {
-        email: 'a@test.com',
-        firstName: 'A',
-      });
-      await NotificationService.notify('user-B', 'kyc-approved', {
-        email: 'b@test.com',
-        firstName: 'B',
+    it('should paginate and filter unread notifications', async () => {
+      mockNotificationFindMany.mockResolvedValue([
+        notifRow('user-1', 'email', 'kyc-approved', { status: 'sent' }),
+      ]);
+      mockNotificationCount.mockResolvedValue(1);
+
+      const result = await NotificationService.getNotifications('user-1', {
+        page: 2,
+        limit: 10,
+        unreadOnly: true,
       });
 
-      const notifsA = await NotificationService.getNotifications('user-A');
-      expect(notifsA.every((n) => n.userId === 'user-A')).toBe(true);
+      expect(mockNotificationFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId: 'user-1', readAt: null },
+          skip: 10,
+          take: 10,
+        })
+      );
+      expect(result.notifications).toHaveLength(1);
+      expect(result.total).toBe(1);
+      expect(result.page).toBe(2);
+      expect(result.limit).toBe(10);
+      expect(result.hasMore).toBe(false);
+    });
+
+    it('should clamp out-of-range page and limit values defensively', async () => {
+      mockNotificationFindMany.mockResolvedValue([]);
+      mockNotificationCount.mockResolvedValue(0);
+
+      const result = await NotificationService.getNotifications('user-clamp', {
+        page: -5,
+        limit: 999999,
+      });
+
+      expect(mockNotificationFindMany).toHaveBeenCalledWith(
+        expect.objectContaining({ skip: 0, take: 100 })
+      );
+      expect(result.page).toBe(1);
+      expect(result.limit).toBe(100);
+    });
+
+    it('should fall back to defaults for non-numeric or fractional page/limit', async () => {
+      mockNotificationFindMany.mockResolvedValue([]);
+      mockNotificationCount.mockResolvedValue(0);
+
+      const result = await NotificationService.getNotifications('user-nan', {
+        page: NaN,
+        limit: 1.5,
+      });
+
+      expect(result.page).toBe(1);
+      expect(result.limit).toBe(20);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // markRead
+  // -------------------------------------------------------------------------
+  describe('markRead', () => {
+    it('should mark the given notification ids as read for the user', async () => {
+      mockNotificationUpdateMany.mockResolvedValue({ count: 2 });
+
+      const count = await NotificationService.markRead('user-1', ['n1', 'n2']);
+
+      expect(mockNotificationUpdateMany).toHaveBeenCalledWith({
+        where: { userId: 'user-1', id: { in: ['n1', 'n2'] } },
+        data: expect.objectContaining({ readAt: expect.any(Date) }),
+      });
+      expect(count).toBe(2);
+    });
+
+    it('should return 0 for an empty id list', async () => {
+      const count = await NotificationService.markRead('user-1', []);
+      expect(count).toBe(0);
+      expect(mockNotificationUpdateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Push subscriptions
+  // -------------------------------------------------------------------------
+  describe('push subscriptions', () => {
+    const subscription = {
+      endpoint: 'https://fcm.googleapis.com/fcm/send/test',
+      keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+      userAgent: 'Chrome/120',
+    };
+
+    it('should register a push subscription via upsert', async () => {
+      mockPushSubUpsert.mockResolvedValue({});
+
+      await NotificationService.registerPushSubscription('user-1', subscription);
+
+      expect(mockPushSubUpsert).toHaveBeenCalledWith({
+        where: { userId_endpoint: { userId: 'user-1', endpoint: subscription.endpoint } },
+        update: expect.objectContaining({ p256dh: 'p256dh-key', auth: 'auth-key' }),
+        create: expect.objectContaining({ userId: 'user-1', endpoint: subscription.endpoint }),
+      });
+    });
+
+    it('should throw for an invalid push subscription', async () => {
+      await expect(
+        NotificationService.registerPushSubscription('user-1', {
+          endpoint: '',
+          keys: { p256dh: '', auth: '' },
+        } as any)
+      ).rejects.toThrow('Invalid push subscription');
+      expect(mockPushSubUpsert).not.toHaveBeenCalled();
+    });
+
+    it('should reject a push subscription with a non-public endpoint', async () => {
+      await expect(
+        NotificationService.registerPushSubscription('user-1', {
+          endpoint: 'https://10.0.0.1/send',
+          keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+        })
+      ).rejects.toThrow('Invalid push subscription');
+      expect(mockPushSubUpsert).not.toHaveBeenCalled();
+    });
+
+    it('should reject a push subscription that is not HTTPS', async () => {
+      await expect(
+        NotificationService.registerPushSubscription('user-1', {
+          endpoint: 'http://fcm.googleapis.com/send',
+          keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+        })
+      ).rejects.toThrow('Invalid push subscription');
+      expect(mockPushSubUpsert).not.toHaveBeenCalled();
+    });
+
+    it('should reject a push subscription with a multicast endpoint (225.0.0.1)', async () => {
+      await expect(
+        NotificationService.registerPushSubscription('user-1', {
+          endpoint: 'https://225.0.0.1/send',
+          keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+        })
+      ).rejects.toThrow('Invalid push subscription');
+      expect(mockPushSubUpsert).not.toHaveBeenCalled();
+    });
+
+    it('should reject a push subscription whose hostname resolves to a private address', async () => {
+      mockLookup.mockResolvedValueOnce([{ address: '127.0.0.1', family: 4 }]);
+
+      await expect(
+        NotificationService.registerPushSubscription('user-1', {
+          endpoint: 'https://internal.push.test/send',
+          keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+        })
+      ).rejects.toThrow('Invalid push subscription');
+      expect(mockPushSubUpsert).not.toHaveBeenCalled();
+    });
+
+    it('should delete a push subscription owned by the user', async () => {
+      mockPushSubDeleteMany.mockResolvedValue({ count: 1 });
+      const deleted = await NotificationService.deletePushSubscription('user-1', 'sub-1');
+      expect(deleted).toBe(true);
+      expect(mockPushSubDeleteMany).toHaveBeenCalledWith({
+        where: { id: 'sub-1', userId: 'user-1' },
+      });
+    });
+
+    it('should return false when deleting a subscription not owned by the user', async () => {
+      mockPushSubDeleteMany.mockResolvedValue({ count: 0 });
+      const deleted = await NotificationService.deletePushSubscription('user-1', 'sub-1');
+      expect(deleted).toBe(false);
+    });
+
+    it('should list push subscriptions in web-push shape', async () => {
+      mockPushSubFindMany.mockResolvedValue([
+        {
+          id: 'sub-1',
+          userId: 'user-1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/test',
+          p256dh: 'p256dh-key',
+          auth: 'auth-key',
+          userAgent: 'Chrome/120',
+        },
+      ]);
+
+      const subs = await NotificationService.getPushSubscriptions('user-1');
+
+      expect(subs).toEqual([
+        {
+          id: 'sub-1',
+          endpoint: 'https://fcm.googleapis.com/fcm/send/test',
+          keys: { p256dh: 'p256dh-key', auth: 'auth-key' },
+          userAgent: 'Chrome/120',
+        },
+      ]);
     });
   });
 });

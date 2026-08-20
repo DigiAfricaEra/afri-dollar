@@ -18,6 +18,7 @@ import type {
 } from '../types/payment.types';
 import { decrypt } from '../utils/crypto';
 
+import { NotificationService } from './notification.service';
 import { StellarService } from './stellar.service';
 import { TransactionMonitorService } from './transaction-monitor.service';
 import { WebhookService } from './webhook.service';
@@ -417,6 +418,14 @@ export const PaymentService = {
         userId,
       });
 
+      void NotificationService.notify(userId, 'transaction-completed', {
+        amount: updatedTx.amount,
+        currency: updatedTx.assetCode,
+        transactionId: updatedTx.id,
+      }).catch((err: unknown) => {
+        console.error('[PaymentService] Failed to send transaction notification:', err);
+      });
+
       return mapToPaymentStatus(updatedTx);
     } catch (stellarError: unknown) {
       const errorMsg = getHorizonErrorMessage(stellarError);
@@ -437,6 +446,15 @@ export const PaymentService = {
         eventType: 'transaction.failed',
         payload: { transactionId: updatedTx.id, error: errorMsg },
         userId,
+      });
+
+      void NotificationService.notify(userId, 'transaction-failed', {
+        amount: updatedTx.amount,
+        currency: updatedTx.assetCode,
+        transactionId: updatedTx.id,
+        reason: errorMsg,
+      }).catch((err: unknown) => {
+        console.error('[PaymentService] Failed to send transaction notification:', err);
       });
 
       return mapToPaymentStatus(updatedTx);

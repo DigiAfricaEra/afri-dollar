@@ -1,3 +1,12 @@
+import { lookup as dnsLookup } from 'node:dns';
+import type { LookupAddress, LookupOptions } from 'node:dns';
+import { lookup } from 'node:dns/promises';
+import https from 'node:https';
+import { isIP } from 'node:net';
+
+import type { Prisma } from '@afri-dollar/database';
+
+import prisma from '../config/database';
 import type {
   Notification,
   NotificationPreferences,
@@ -6,11 +15,10 @@ import type {
   NotificationType,
 } from '../types/notification.types';
 
-// ---------------------------------------------------------------------------
-// In-memory stores (replace with DB persistence in production)
-// ---------------------------------------------------------------------------
-const notificationStore: Notification[] = [];
-const preferencesStore: Map<string, NotificationPreferences> = new Map();
+export const DEFAULT_PAGE = 1;
+export const DEFAULT_LIMIT = 20;
+export const MAX_PAGE = 1000;
+export const MAX_LIMIT = 100;
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -83,8 +91,158 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number = PROVIDER_TIMEOU
   });
 }
 
-function generateId(): string {
-  return `notif_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+function isPrivateIPv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
+    return true;
+  }
+  const [a, b] = parts;
+  if (a === 0) return true; // 0.0.0.0/8 "this" network
+  if (a === 10) return true; // 10.0.0.0/8 private
+  if (a === 127) return true; // 127.0.0.0/8 loopback
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local
+  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 private
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16 private
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 shared
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18.0.0/15 benchmark
+  if (a >= 224 && a <= 239) return true; // 224.0.0.0/4 multicast
+  if (a >= 240) return true; // 240.0.0.0/4 reserved + broadcast
+  return false;
+}
+
+/**
+ * Returns true for loopback, private, link-local, reserved, multicast, or
+ * otherwise non-public destinations so we never push to internal networks.
+ */
+function isPrivateAddress(ip: string): boolean {
+  if (ip.includes(':')) {
+    const mapped = ip.toLowerCase().match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) {
+      return isPrivateIPv4(mapped[1]);
+    }
+    const lower = ip.toLowerCase();
+    if (lower === '::' || lower === '::1') return true; // unspecified + loopback
+    if (/^f[c-d]/.test(lower)) return true; // fc00::/7 unique local
+    if (/^fe[89ab]/.test(lower)) return true; // fe80::/10 link-local
+    if (lower.startsWith('ff')) return true; // ff00::/8 multicast
+    if (lower.startsWith('2001:db8')) return true; // documentation range
+    return false;
+  }
+  return isPrivateIPv4(ip);
+}
+
+/**
+ * Resolve the push endpoint hostname and reject loopback, private, link-local,
+ * reserved, or otherwise non-public destinations. Only public HTTPS endpoints
+ * are allowed. This guards against SSRF via a stored/malicious endpoint.
+ */
+async function assertPublicEndpoint(endpoint: string): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    throw new Error('Invalid push subscription');
+  }
+
+  if (url.protocol !== 'https:') {
+    throw new Error('Invalid push subscription');
+  }
+
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+
+  if (isIP(hostname) !== 0) {
+    if (isPrivateAddress(hostname)) {
+      throw new Error('Invalid push subscription');
+    }
+    return;
+  }
+
+  let addresses: Array<{ address: string; family: number }>;
+  try {
+    addresses = await lookup(hostname, { all: true });
+  } catch {
+    throw new Error('Invalid push subscription');
+  }
+
+  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateAddress(address))) {
+    throw new Error('Invalid push subscription');
+  }
+}
+
+/**
+ * Validates the resolved addresses for an outbound push connection against the
+ * public-endpoint rules. Rejects loopback, private, link-local, reserved,
+ * multicast, or otherwise non-public destinations.
+ */
+function validateResolvedAddresses(addresses: LookupAddress[]): void {
+  if (addresses.length === 0 || addresses.some(({ address }) => isPrivateAddress(address))) {
+    throw new Error('Invalid push subscription');
+  }
+}
+
+type LookupCallback = (
+  err: NodeJS.ErrnoException | null,
+  address?: string | LookupAddress[],
+  family?: number
+) => void;
+
+type PublicDnsLookup = (
+  hostname: string,
+  options: LookupOptions,
+  callback: (err: NodeJS.ErrnoException | null, addresses?: LookupAddress[]) => void
+) => void;
+
+/**
+ * Lookup callback bound to the outbound HTTPS connection. Resolves the
+ * hostname, re-validates every address against the public-endpoint rules, and
+ * rejects the connection if any address is non-public. This closes the
+ * DNS-rebinding (TOCTOU) window between the pre-check and the actual connect.
+ */
+function publicLookup(
+  lookupFn: PublicDnsLookup,
+  hostname: string,
+  options: LookupOptions,
+  callback: LookupCallback
+): void {
+  lookupFn(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) {
+      callback(err);
+      return;
+    }
+
+    const list = addresses ?? [];
+
+    try {
+      validateResolvedAddresses(list);
+    } catch (validationErr) {
+      callback(validationErr as NodeJS.ErrnoException);
+      return;
+    }
+
+    if (options.all === true) {
+      callback(null, list);
+    } else if (list[0]) {
+      callback(null, list[0].address, list[0].family);
+    } else {
+      callback(new Error('Invalid push subscription'));
+    }
+  });
+}
+
+/**
+ * Builds an HTTPS agent whose connection-time lookup validates every resolved
+ * address so push traffic can never reach an internal network.
+ */
+export function createPublicEndpointAgent(): https.Agent {
+  const lookup = ((hostname: string, options: LookupOptions, callback: LookupCallback) =>
+    publicLookup(
+      dnsLookup as unknown as PublicDnsLookup,
+      hostname,
+      options,
+      callback
+    )) as https.AgentOptions['lookup'];
+
+  return new https.Agent({ lookup });
 }
 
 function escapeHtml(str: string): string {
@@ -102,32 +260,74 @@ function renderTemplate(template: string, data: Record<string, unknown>): string
   );
 }
 
-function getDefaultPreferences(userId: string): NotificationPreferences {
+function toPreferences(row: {
+  userId: string;
+  email: boolean;
+  sms: boolean;
+  push: boolean;
+  transactionAlerts: boolean;
+  securityAlerts: boolean;
+  payrollAlerts: boolean;
+  marketing: boolean;
+}): NotificationPreferences {
   return {
-    userId,
-    email: true,
-    sms: true,
-    push: true,
-    transactionAlerts: true,
-    securityAlerts: true,
-    payrollAlerts: true,
-    marketing: false,
+    userId: row.userId,
+    email: row.email,
+    sms: row.sms,
+    push: row.push,
+    transactionAlerts: row.transactionAlerts,
+    securityAlerts: row.securityAlerts,
+    payrollAlerts: row.payrollAlerts,
+    marketing: row.marketing,
   };
 }
 
-function getUserPreferences(userId: string): NotificationPreferences {
-  return preferencesStore.get(userId) ?? getDefaultPreferences(userId);
+function toNotification(row: {
+  id: string;
+  userId: string;
+  type: string;
+  channel: 'email' | 'sms' | 'push';
+  template: string;
+  data: Prisma.JsonValue;
+  status: 'pending' | 'sent' | 'delivered' | 'failed';
+  sentAt: Date | null;
+  readAt: Date | null;
+  createdAt: Date;
+}): Notification {
+  return {
+    id: row.id,
+    userId: row.userId,
+    type: row.type as NotificationType,
+    channel: row.channel,
+    template: row.template,
+    data: (row.data ?? {}) as Record<string, unknown>,
+    status: row.status,
+    sentAt: row.sentAt ?? undefined,
+    readAt: row.readAt ?? undefined,
+    createdAt: row.createdAt,
+  };
+}
+
+function toWebPushSubscription(row: {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+}): PushSubscription {
+  return {
+    endpoint: row.endpoint,
+    keys: { p256dh: row.p256dh, auth: row.auth },
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Channel-level senders (thin wrappers — real integration injected via env)
 // ---------------------------------------------------------------------------
 
-async function deliverEmail(to: string, subject: string, body: string): Promise<void> {
+async function deliverEmail(to: string, subject: string, body: string): Promise<boolean> {
   const sgMail = await getEmailClient();
   if (!sgMail) {
     console.warn('[NotificationService] SendGrid not configured – skipping email delivery');
-    return;
+    return false;
   }
 
   await withTimeout(
@@ -139,13 +339,15 @@ async function deliverEmail(to: string, subject: string, body: string): Promise<
       html: `<p>${escapeHtml(body).replace(/\n/g, '<br/>')}</p>`,
     })
   );
+
+  return true;
 }
 
-async function deliverSMS(to: string, message: string): Promise<void> {
+async function deliverSMS(to: string, message: string): Promise<boolean> {
   const twilioClient = await getTwilioClient();
   if (!twilioClient) {
     console.warn('[NotificationService] Twilio not configured – skipping SMS delivery');
-    return;
+    return false;
   }
 
   await withTimeout(
@@ -155,19 +357,29 @@ async function deliverSMS(to: string, message: string): Promise<void> {
       to,
     })
   );
+
+  return true;
 }
 
 async function deliverPush(
   subscription: PushSubscription,
   payload: Record<string, unknown>
-): Promise<void> {
+): Promise<boolean> {
   const webpush = await getWebPushClient();
   if (!webpush) {
     console.warn('[NotificationService] web-push not configured – skipping push notification');
-    return;
+    return false;
   }
 
-  await withTimeout(webpush.sendNotification(subscription, JSON.stringify(payload)));
+  await assertPublicEndpoint(subscription.endpoint);
+
+  await withTimeout(
+    webpush.sendNotification(subscription, JSON.stringify(payload), {
+      agent: createPublicEndpointAgent(),
+    })
+  );
+
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +419,11 @@ async function getTwilioClient(): Promise<{
 }
 
 async function getWebPushClient(): Promise<{
-  sendNotification: (sub: unknown, payload: string) => Promise<unknown>;
+  sendNotification: (
+    sub: unknown,
+    payload: string,
+    options?: Record<string, unknown>
+  ) => Promise<unknown>;
   setVapidDetails: (s: string, pub: string, priv: string) => void;
 } | null> {
   try {
@@ -258,15 +474,23 @@ export const NotificationService = {
   },
 
   /**
-   * High-level notify: checks user preferences and dispatches across all
-   * enabled channels concurrently.
+   * High-level notify: reads preferences and recipient contact info from the
+   * database, then dispatches across all enabled channels concurrently while
+   * persisting a per-channel Notification row.
    */
   async notify(
     userId: string,
     type: NotificationType,
     data: Record<string, unknown>
   ): Promise<void> {
-    const prefs = getUserPreferences(userId);
+    const [prefs, user, pushSubscriptions] = await Promise.all([
+      this.getPreferences(userId),
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: { email: true, phoneNumber: true },
+      }),
+      prisma.pushSubscription.findMany({ where: { userId } }),
+    ]);
 
     // Determine whether to send based on notification category
     const isTransactionEvent = type === 'transaction-completed' || type === 'transaction-failed';
@@ -287,47 +511,54 @@ export const NotificationService = {
     const body = renderTemplate(tmpl.body, data);
     const subject = tmpl.subject ? renderTemplate(tmpl.subject, data) : 'Notification';
 
+    const email = typeof data.email === 'string' ? data.email : (user?.email ?? undefined);
+    const phone = typeof data.phone === 'string' ? data.phone : (user?.phoneNumber ?? undefined);
+
     const channels: Array<'email' | 'sms' | 'push'> = [];
     if (prefs.email) channels.push('email');
     if (prefs.sms) channels.push('sms');
     if (prefs.push) channels.push('push');
 
     const channelTasks = channels.map(async (channel) => {
-      const notif: Notification = {
-        id: generateId(),
-        userId,
-        type: channel,
-        channel,
-        template: type,
-        data,
-        status: 'pending',
-      };
-      notificationStore.push(notif);
+      const notif = await prisma.notification.create({
+        data: {
+          userId,
+          type,
+          channel,
+          template: type,
+          data: data as Prisma.InputJsonValue,
+          status: 'pending',
+        },
+      });
 
       try {
-        if (channel === 'email' && typeof data.email === 'string') {
-          await deliverEmail(data.email, subject, body);
-          notif.status = 'sent';
-          notif.sentAt = new Date();
-        } else if (channel === 'sms' && typeof data.phone === 'string') {
-          await deliverSMS(data.phone, body);
-          notif.status = 'sent';
-          notif.sentAt = new Date();
-        } else if (channel === 'push' && data.pushSubscription != null) {
-          await deliverPush(data.pushSubscription as PushSubscription, {
-            title: subject,
-            body,
-            type,
-          });
-          notif.status = 'sent';
-          notif.sentAt = new Date();
-        } else {
-          // Recipient info not available for this channel; mark as failed
-          notif.status = 'failed';
+        let delivered = false;
+
+        if (channel === 'email' && email) {
+          delivered = await deliverEmail(email, subject, body);
+        } else if (channel === 'sms' && phone) {
+          delivered = await deliverSMS(phone, body);
+        } else if (channel === 'push' && pushSubscriptions.length > 0) {
+          const results = await Promise.allSettled(
+            pushSubscriptions.map((sub) =>
+              deliverPush(toWebPushSubscription(sub), { title: subject, body, type })
+            )
+          );
+          delivered = results.some(
+            (result) => result.status === 'fulfilled' && result.value === true
+          );
         }
+
+        await prisma.notification.update({
+          where: { id: notif.id },
+          data: delivered ? { status: 'sent', sentAt: new Date() } : { status: 'failed' },
+        });
       } catch (err) {
         console.error(`[NotificationService] Failed to send ${channel} notification:`, err);
-        notif.status = 'failed';
+        await prisma.notification.update({
+          where: { id: notif.id },
+          data: { status: 'failed' },
+        });
       }
     });
 
@@ -335,30 +566,162 @@ export const NotificationService = {
   },
 
   /**
-   * Update notification preferences for a user.
+   * Update notification preferences for a user (creates defaults on first write).
    */
   async updatePreferences(
     userId: string,
     preferences: Partial<NotificationPreferences>
   ): Promise<NotificationPreferences> {
-    const existing = getUserPreferences(userId);
-    const updated: NotificationPreferences = { ...existing, ...preferences, userId };
-    preferencesStore.set(userId, updated);
-    return updated;
+    const updates = {
+      email: preferences.email,
+      sms: preferences.sms,
+      push: preferences.push,
+      transactionAlerts: preferences.transactionAlerts,
+      securityAlerts: preferences.securityAlerts,
+      payrollAlerts: preferences.payrollAlerts,
+      marketing: preferences.marketing,
+    };
+
+    const updated = await prisma.notificationPreference.upsert({
+      where: { userId },
+      update: updates,
+      create: { userId, ...updates },
+    });
+
+    return toPreferences(updated);
   },
 
   /**
-   * Get notification preferences for a user.
+   * Get notification preferences for a user (creates defaults on first access).
    */
   async getPreferences(userId: string): Promise<NotificationPreferences> {
-    return getUserPreferences(userId);
+    const row = await prisma.notificationPreference.upsert({
+      where: { userId },
+      update: {},
+      create: { userId },
+    });
+
+    return toPreferences(row);
   },
 
   /**
-   * Get all notifications for a user (delivery tracking).
+   * Get paginated notifications for a user (delivery tracking).
    */
-  async getNotifications(userId: string): Promise<Notification[]> {
-    return notificationStore.filter((n) => n.userId === userId);
+  async getNotifications(
+    userId: string,
+    options: { page?: number; limit?: number; unreadOnly?: boolean } = {}
+  ): Promise<{
+    notifications: Notification[];
+    total: number;
+    page: number;
+    limit: number;
+    hasMore: boolean;
+  }> {
+    const rawPage = options.page ?? DEFAULT_PAGE;
+    const rawLimit = options.limit ?? DEFAULT_LIMIT;
+
+    const page =
+      Number.isSafeInteger(rawPage) && rawPage > 0 ? Math.min(rawPage, MAX_PAGE) : DEFAULT_PAGE;
+    const limit =
+      Number.isSafeInteger(rawLimit) && rawLimit > 0
+        ? Math.min(rawLimit, MAX_LIMIT)
+        : DEFAULT_LIMIT;
+
+    const where = {
+      userId,
+      ...(options.unreadOnly === true ? { readAt: null } : {}),
+    };
+
+    const [rows, total] = await Promise.all([
+      prisma.notification.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.notification.count({ where }),
+    ]);
+
+    return {
+      notifications: rows.map(toNotification),
+      total,
+      page,
+      limit,
+      hasMore: page * limit < total,
+    };
+  },
+
+  /**
+   * Mark the given notifications as read for a user.
+   */
+  async markRead(userId: string, ids: string[]): Promise<number> {
+    if (!ids || ids.length === 0) return 0;
+
+    const result = await prisma.notification.updateMany({
+      where: { userId, id: { in: ids } },
+      data: { readAt: new Date() },
+    });
+
+    return result.count;
+  },
+
+  /**
+   * Register (or refresh) a device web-push subscription for a user.
+   */
+  async registerPushSubscription(
+    userId: string,
+    subscription: PushSubscription
+  ): Promise<PushSubscription> {
+    const { endpoint, keys, userAgent } = subscription;
+
+    if (!endpoint || !keys?.p256dh || !keys?.auth) {
+      throw new Error('Invalid push subscription');
+    }
+
+    await assertPublicEndpoint(endpoint);
+
+    await prisma.pushSubscription.upsert({
+      where: { userId_endpoint: { userId, endpoint } },
+      update: {
+        p256dh: keys.p256dh,
+        auth: keys.auth,
+        userAgent: userAgent ?? null,
+      },
+      create: {
+        userId,
+        endpoint,
+        p256dh: keys.p256dh,
+        auth: keys.auth,
+        userAgent: userAgent ?? null,
+      },
+    });
+
+    return { endpoint, keys, userAgent };
+  },
+
+  /**
+   * Remove a device web-push subscription for a user.
+   */
+  async deletePushSubscription(userId: string, id: string): Promise<boolean> {
+    const result = await prisma.pushSubscription.deleteMany({
+      where: { id, userId },
+    });
+
+    return result.count > 0;
+  },
+
+  /**
+   * List registered push subscriptions for a user.
+   */
+  async getPushSubscriptions(userId: string): Promise<PushSubscription[]> {
+    const rows = await prisma.pushSubscription.findMany({ where: { userId } });
+
+    return rows.map((row) => ({
+      id: row.id,
+      endpoint: row.endpoint,
+      keys: { p256dh: row.p256dh, auth: row.auth },
+      userAgent: row.userAgent ?? undefined,
+    }));
   },
 
   /**
@@ -374,8 +737,4 @@ export const NotificationService = {
   getTemplate(id: string): NotificationTemplate | undefined {
     return TEMPLATES[id];
   },
-
-  // Expose for testing purposes
-  _notificationStore: notificationStore,
-  _preferencesStore: preferencesStore,
 };

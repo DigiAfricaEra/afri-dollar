@@ -1,7 +1,8 @@
 /* eslint-disable */
-import { Keypair } from '@stellar/stellar-sdk';
+import { Account, Keypair } from '@stellar/stellar-sdk';
 
 import prisma from '../../config/database';
+import { NotificationService } from '../../services/notification.service';
 import { PaymentService } from '../../services/payment.service';
 import { encrypt } from '../../utils/crypto';
 
@@ -23,6 +24,10 @@ jest.mock('@stellar/stellar-sdk', () => {
     },
   };
 });
+
+const mockLoadAccount = (global as Record<string, unknown>).__mockLoadAccount as jest.Mock;
+const mockSubmitTransaction = (global as Record<string, unknown>)
+  .__mockSubmitTransaction as jest.Mock;
 
 jest.mock('../../config/database', () => {
   const client: Record<string, unknown> = {
@@ -69,6 +74,10 @@ jest.mock('../../config/database', () => {
   };
 });
 
+jest.mock('../../services/notification.service', () => ({
+  NotificationService: { notify: jest.fn().mockResolvedValue(undefined) },
+}));
+
 const mockWalletFindUnique = prisma.wallet.findUnique as jest.Mock;
 const mockUserFindUnique = prisma.user.findUnique as jest.Mock;
 const mockTransactionCreate = prisma.transaction.create as jest.Mock;
@@ -80,6 +89,7 @@ const mockTransactionCount = prisma.transaction.count as jest.Mock;
 const mockSystemConfigFindMany = prisma.systemConfig.findMany as jest.Mock;
 const mockComplianceAlertCreate = prisma.complianceAlert.create as jest.Mock;
 const mockAuditLogCreate = prisma.auditLog.create as jest.Mock;
+const mockNotify = NotificationService.notify as jest.Mock;
 
 describe('PaymentService', () => {
   const mockUserId = 'user-1';
@@ -822,6 +832,52 @@ describe('PaymentService', () => {
             success: false,
           }),
         })
+      );
+    });
+
+    it('should fire a transaction-failed notification when Horizon returns op_no_source_account', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        id: 'tx-1',
+        status: 'created',
+        userId: mockUserId,
+        metadata: crossBorderMetadata,
+        amount: '100',
+        assetCode: 'XLM',
+        wallet: { secretKeyEncrypted: mockSecretEncrypted },
+      });
+      mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
+      mockTransactionUpdate.mockResolvedValue({
+        id: 'tx-1',
+        status: 'failed',
+        amount: '100',
+        assetCode: 'XLM',
+        errorMessage:
+          'Stellar payment failed. Transaction Code: tx_failed. Operations Codes: [op_no_source_account]',
+      });
+
+      mockLoadAccount.mockResolvedValue(new Account(mockPublicKey, '100'));
+
+      const horizonError = new Error('Stellar payment failed') as Error & { response: unknown };
+      horizonError.response = {
+        data: {
+          extras: {
+            result_codes: {
+              transaction: 'tx_failed',
+              operations: ['op_no_source_account'],
+            },
+          },
+        },
+      };
+      mockSubmitTransaction.mockRejectedValue(horizonError);
+
+      const result = await PaymentService.processPayment('tx-1', mockUserId);
+
+      expect(result.status).toBe('failed');
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      expect(mockNotify).toHaveBeenCalledWith(
+        mockUserId,
+        'transaction-failed',
+        expect.objectContaining({ transactionId: 'tx-1' })
       );
     });
   });
