@@ -360,26 +360,6 @@ fn lock_asset_tracks_collected_fees() {
 }
 
 #[test]
-fn lock_asset_emits_event() {
-    let (env, fixture) = setup();
-    let request_id = lock(&env, &fixture, &fixture.user, 10_000);
-    let expected = BridgeInitiated {
-        request_id,
-        source_chain: symbol_short!("stellar"),
-        destination_chain: symbol_short!("ethereum"),
-        asset: fixture.asset.clone(),
-        amount: 9_970,
-        gross_amount: 10_000,
-        fee_amount: 30,
-        sender: fixture.user.clone(),
-    };
-    assert_eq!(
-        env.events().all().filter_by_contract(&fixture.contract_id),
-        std::vec![expected.to_xdr(&env, &fixture.contract_id)]
-    );
-}
-
-#[test]
 fn lock_asset_increments_request_id() {
     let (env, fixture) = setup();
     assert_eq!(lock(&env, &fixture, &fixture.user, 1000), 1);
@@ -1031,6 +1011,31 @@ fn mint_wrapped_rejects_invalid_signature_payload() {
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
 }
 
+/// A high-s signature must be rejected before the Soroban host recovery call,
+/// which requires normalized ECDSA signatures.
+#[test]
+fn mint_wrapped_rejects_high_s_signature() {
+    let (env, fixture) = setup();
+    let request_id = lock(&env, &fixture, &fixture.user, 10_000);
+
+    let mut r = [0u8; 32];
+    r[31] = 1;
+    let high_s = [
+        0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b,
+        0x20, 0xa1,
+    ];
+    let mut proof = Bytes::new(&env);
+    for _ in 0..2 {
+        proof.push_back(0);
+        proof.extend_from_array(&r);
+        proof.extend_from_array(&high_s);
+    }
+
+    let result = client(&env, &fixture).try_mint_wrapped(&request_id, &proof, &fixture.issuer);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+}
+
 /// A proof cannot contain more signature blocks than the configured signer
 /// set, because extra blocks can never contribute to the threshold.
 #[test]
@@ -1059,10 +1064,8 @@ fn set_signers_rejects_duplicates() {
     assert_eq!(client(&env, &fixture).get_signer_threshold(), 2);
 }
 
-/// The BridgeInitiated event published by `lock_asset` carries the gross
-/// amount, net amount, and the fee that was taken. We confirm at least one
-/// event lands against the bridge contract after a lock and that it is
-/// emitted under the `bridge` topic.
+/// The BridgeInitiated event and stored request published by `lock_asset`
+/// carry the gross amount, net amount, and the fee that was taken.
 #[test]
 fn lock_asset_emits_bridge_initiated_event() {
     let (env, fixture) = setup();

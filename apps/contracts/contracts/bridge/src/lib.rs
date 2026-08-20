@@ -276,11 +276,19 @@ const SECP256K1_ORDER: [u8; 32] = [
     0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
 ];
 
-fn is_valid_secp256k1_scalar(bytes: &[u8]) -> bool {
+/// Soroban's secp256k1 host requires normalized ECDSA signatures, meaning
+/// `s` must be at most half the curve order. Keep this bound explicit so a
+/// high-s signature is rejected before the host recovery call can trap.
+const SECP256K1_HALF_ORDER: [u8; 32] = [
+    0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x5d, 0x57, 0x6e, 0x73, 0x57, 0xa4, 0x50, 0x1d, 0xdf, 0xe9, 0x2f, 0x46, 0x68, 0x1b, 0x20, 0xa0,
+];
+
+fn is_valid_secp256k1_scalar(bytes: &[u8], upper_bound: &[u8; 32], inclusive: bool) -> bool {
     if bytes.iter().all(|byte| *byte == 0) {
         return false;
     }
-    for (byte, limit) in bytes.iter().zip(SECP256K1_ORDER.iter()) {
+    for (byte, limit) in bytes.iter().zip(upper_bound.iter()) {
         if byte < limit {
             return true;
         }
@@ -288,7 +296,7 @@ fn is_valid_secp256k1_scalar(bytes: &[u8]) -> bool {
             return false;
         }
     }
-    false
+    inclusive
 }
 
 /// Reject a caller when the on-disk storage schema is from a previous release.
@@ -371,8 +379,8 @@ fn verify_proof(
             BytesN::<64>::try_from(proof.slice(offset + 1..offset + SIGNATURE_BLOCK_SIZE))
                 .map_err(|_| Error::Unauthorized)?;
         let signature_bytes = signature.to_array();
-        if !is_valid_secp256k1_scalar(&signature_bytes[..32])
-            || !is_valid_secp256k1_scalar(&signature_bytes[32..])
+        if !is_valid_secp256k1_scalar(&signature_bytes[..32], &SECP256K1_ORDER, false)
+            || !is_valid_secp256k1_scalar(&signature_bytes[32..], &SECP256K1_HALF_ORDER, true)
         {
             return Err(Error::Unauthorized);
         }
