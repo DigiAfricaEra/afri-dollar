@@ -288,6 +288,7 @@ impl PayrollContract {
             amount,
         });
 
+        batch.recipients = recipients.clone();
         put_batch(&env, &batch);
         put_recipients(&env, batch_id, &recipients);
         extend_persistent_ttl(&env, &DataKey::PayrollBatch(batch_id));

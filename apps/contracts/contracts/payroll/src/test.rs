@@ -129,6 +129,9 @@ fn creator_can_add() {
 
     let batch = c.get_batch(&batch_id);
     assert_eq!(batch.total_amount, 500);
+    assert_eq!(batch.recipients.len(), 1);
+    assert_eq!(batch.recipients.get(0).unwrap().address, recipient);
+    assert_eq!(batch.recipients.get(0).unwrap().amount, 500);
 }
 
 #[test]
@@ -422,6 +425,9 @@ fn get_batch_returns_matching_fields_each_step() {
     c.add_recipient(&f.creator, &batch_id, &r, &500);
     let batch = c.get_batch(&batch_id);
     assert_eq!(batch.total_amount, 500);
+    assert_eq!(batch.recipients.len(), 1);
+    assert_eq!(batch.recipients.get(0).unwrap().address, r);
+    assert_eq!(batch.recipients.get(0).unwrap().amount, 500);
     assert_eq!(batch.status, BatchStatus::Open);
 
     // Funded
@@ -455,9 +461,6 @@ fn create_batch_event_is_correct() {
 
     let batch_id = c.create_batch(&f.creator, &f.asset);
 
-    let events = env.events().all();
-    let actual = events.events().last().expect("expected create_batch event");
-
     let expected = BatchCreated {
         batch_id,
         creator: f.creator.clone(),
@@ -465,7 +468,10 @@ fn create_batch_event_is_correct() {
     }
     .to_xdr(&env, &f.contract_id);
 
-    assert_eq!(actual, &expected);
+    assert_eq!(
+        env.events().all().filter_by_contract(&f.contract_id),
+        std::vec![expected]
+    );
 }
 
 #[test]
@@ -477,12 +483,6 @@ fn add_recipient_event_is_correct() {
     let recipient = Address::generate(&env);
     c.add_recipient(&f.creator, &batch_id, &recipient, &300);
 
-    let events = env.events().all();
-    let actual = events
-        .events()
-        .last()
-        .expect("expected add_recipient event");
-
     let expected = RecipientAdded {
         batch_id,
         recipient: recipient.clone(),
@@ -490,7 +490,10 @@ fn add_recipient_event_is_correct() {
     }
     .to_xdr(&env, &f.contract_id);
 
-    assert_eq!(actual, &expected);
+    assert_eq!(
+        env.events().all().filter_by_contract(&f.contract_id),
+        std::vec![expected]
+    );
 }
 
 #[test]
@@ -505,9 +508,6 @@ fn fund_batch_event_is_correct() {
 
     c.fund_batch(&batch_id, &f.funder);
 
-    let events = env.events().all();
-    let actual = events.events().last().expect("expected fund_batch event");
-
     let expected = BatchFunded {
         batch_id,
         funder: f.funder.clone(),
@@ -515,7 +515,10 @@ fn fund_batch_event_is_correct() {
     }
     .to_xdr(&env, &f.contract_id);
 
-    assert_eq!(actual, &expected);
+    assert_eq!(
+        env.events().all().filter_by_contract(&f.contract_id),
+        std::vec![expected]
+    );
 }
 
 #[test]
@@ -530,16 +533,16 @@ fn distribute_event_is_correct() {
     c.fund_batch(&batch_id, &f.funder);
     c.distribute(&batch_id);
 
-    let events = env.events().all();
-    let actual = events.events().last().expect("expected distribution event");
-
     let expected = DistributionCompleted {
         batch_id,
         total_amount: 100,
     }
     .to_xdr(&env, &f.contract_id);
 
-    assert_eq!(actual, &expected);
+    assert_eq!(
+        env.events().all().filter_by_contract(&f.contract_id),
+        std::vec![expected]
+    );
 }
 
 #[test]
@@ -551,16 +554,16 @@ fn cancel_batch_event_is_correct() {
 
     c.cancel_batch(&f.creator, &batch_id);
 
-    let events = env.events().all();
-    let actual = events.events().last().expect("expected cancel_batch event");
-
     let expected = BatchCancelled {
         batch_id,
         creator: f.creator.clone(),
     }
     .to_xdr(&env, &f.contract_id);
 
-    assert_eq!(actual, &expected);
+    assert_eq!(
+        env.events().all().filter_by_contract(&f.contract_id),
+        std::vec![expected]
+    );
 }
 
 // Additional edge cases
