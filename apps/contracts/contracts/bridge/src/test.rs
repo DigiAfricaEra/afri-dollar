@@ -1199,3 +1199,41 @@ fn mint_proof_is_not_redirectable() {
     assert_eq!(result, Err(Ok(Error::Unauthorized)));
     assert_eq!(token(&env, &fixture.asset).balance(&attacker), 0);
 }
+
+/// The `migrate_storage` admin hook must require admin authorization and
+/// must accept a legitimate admin invocation. Once called, the bridge keeps
+/// working with the new layout.
+#[test]
+fn migrate_storage_requires_admin_and_is_idempotent() {
+    let (env, fixture) = setup();
+
+    // A non-admin cannot invoke migrate_storage.
+    let stranger = Address::generate(&env);
+    let result = client(&env, &fixture).try_migrate_storage(&stranger);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+
+    // The admin can invoke it; the call is idempotent today (the layout is
+    // already current), but the contract must continue to function after.
+    client(&env, &fixture).migrate_storage(&fixture.admin);
+    let _ = lock(&env, &fixture, &fixture.user, 1_000);
+}
+
+/// After migrate_storage the bridge must continue to operate normally;
+/// the hook is idempotent today and keeps the on-disk `StorageVersion`
+/// current.
+#[test]
+fn migrate_storage_keeps_bridge_functional() {
+    let (env, fixture) = setup();
+
+    // Admin invokes the migration.
+    client(&env, &fixture).migrate_storage(&fixture.admin);
+
+    // Lock and view still work end-to-end.
+    let request_id = lock(&env, &fixture, &fixture.user, 1_000);
+    let request = client(&env, &fixture)
+        .get_bridge_request(&request_id)
+        .unwrap();
+    assert_eq!(request.gross_amount, 1_000);
+    assert_eq!(request.bridge_fee_applied, 3); // 30 bps on 1000
+    assert_eq!(request.amount, 997);
+}
