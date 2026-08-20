@@ -60,6 +60,7 @@ jest.mock('../../config/database', () => {
     },
     kYCRecord: {
       findFirst: jest.fn(),
+      findMany: jest.fn(),
     },
   };
 
@@ -95,7 +96,7 @@ const mockTransactionFindMany = prisma.transaction.findMany as jest.Mock;
 const mockSystemConfigFindMany = prisma.systemConfig.findMany as jest.Mock;
 const mockComplianceAlertCreate = prisma.complianceAlert.create as jest.Mock;
 const mockAuditLogCreate = prisma.auditLog.create as jest.Mock;
-const mockKYCRecordFindFirst = prisma.kYCRecord.findFirst as jest.Mock;
+const mockKYCRecordFindMany = prisma.kYCRecord.findMany as jest.Mock;
 
 const testKeypair = Keypair.random();
 const mockPublicKey = testKeypair.publicKey();
@@ -175,8 +176,8 @@ describe('PaymentService — KYC Gating', () => {
   // ── Payments >= $1,000 without KYC ────────────────────────────────────
 
   it('should block payment >= $1,000 without approved KYC', async () => {
-    // No KYC record exists
-    mockKYCRecordFindFirst.mockResolvedValue(null);
+    // No approved KYC records exist
+    mockKYCRecordFindMany.mockResolvedValue([]);
 
     await expect(
       PaymentService.createCrossBorderPayment(
@@ -187,12 +188,8 @@ describe('PaymentService — KYC Gating', () => {
   });
 
   it('should block payment >= $1,000 with pending KYC (not approved)', async () => {
-    mockKYCRecordFindFirst.mockResolvedValue({
-      id: 'kyc-1',
-      userId: mockUserId,
-      level: 'BASIC',
-      status: 'pending',
-    });
+    // findMany returns only approved records — so none match
+    mockKYCRecordFindMany.mockResolvedValue([]);
 
     await expect(
       PaymentService.createCrossBorderPayment(
@@ -203,12 +200,8 @@ describe('PaymentService — KYC Gating', () => {
   });
 
   it('should block payment >= $1,000 with rejected KYC', async () => {
-    mockKYCRecordFindFirst.mockResolvedValue({
-      id: 'kyc-1',
-      userId: mockUserId,
-      level: 'BASIC',
-      status: 'rejected',
-    });
+    // findMany returns only approved records — so none match
+    mockKYCRecordFindMany.mockResolvedValue([]);
 
     await expect(
       PaymentService.createCrossBorderPayment(
@@ -221,12 +214,9 @@ describe('PaymentService — KYC Gating', () => {
   // ── Payments >= $1,000 with BASIC KYC ─────────────────────────────────
 
   it('should block payment >= $1,000 with only BASIC level KYC', async () => {
-    mockKYCRecordFindFirst.mockResolvedValue({
-      id: 'kyc-1',
-      userId: mockUserId,
-      level: 'BASIC',
-      status: 'approved',
-    });
+    mockKYCRecordFindMany.mockResolvedValue([
+      { id: 'kyc-1', userId: mockUserId, level: 'BASIC', status: 'approved' },
+    ]);
 
     await expect(
       PaymentService.createCrossBorderPayment(
@@ -239,12 +229,9 @@ describe('PaymentService — KYC Gating', () => {
   // ── Payments >= $10,000 without ENHANCED KYC ──────────────────────────
 
   it('should block payment >= $10,000 without ENHANCED KYC level', async () => {
-    mockKYCRecordFindFirst.mockResolvedValue({
-      id: 'kyc-1',
-      userId: mockUserId,
-      level: 'STANDARD',
-      status: 'approved',
-    });
+    mockKYCRecordFindMany.mockResolvedValue([
+      { id: 'kyc-1', userId: mockUserId, level: 'STANDARD', status: 'approved' },
+    ]);
 
     await expect(
       PaymentService.createCrossBorderPayment(
@@ -261,12 +248,9 @@ describe('PaymentService — KYC Gating', () => {
   // ── Payments with full ENHANCED KYC ───────────────────────────────────
 
   it('should allow payment >= $10,000 with ENHANCED KYC', async () => {
-    mockKYCRecordFindFirst.mockResolvedValue({
-      id: 'kyc-1',
-      userId: mockUserId,
-      level: 'ENHANCED',
-      status: 'approved',
-    });
+    mockKYCRecordFindMany.mockResolvedValue([
+      { id: 'kyc-1', userId: mockUserId, level: 'ENHANCED', status: 'approved' },
+    ]);
 
     const mockTx = {
       id: 'tx-large',

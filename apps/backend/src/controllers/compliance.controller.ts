@@ -56,6 +56,7 @@ const resolveAlertSchema = z.object({
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Extracts the authenticated user ID from the request, returning null and sending a 401 if missing. */
 function requireUser(req: AuthRequest, res: Response): string | null {
   if (!req.user) {
     res.status(401).json({ success: false, error: 'Access token is required' });
@@ -64,6 +65,7 @@ function requireUser(req: AuthRequest, res: Response): string | null {
   return req.user.userId;
 }
 
+/** Maps thrown errors to appropriate HTTP status codes and JSON responses. */
 function handleError(res: Response, error: unknown): void {
   if (error instanceof z.ZodError) {
     res.status(400).json({
@@ -265,6 +267,14 @@ export const ComplianceController = {
           } else if (status === 'pending' || status === 'init') {
             newStatus = 'review';
           }
+        }
+
+        // Replay / idempotency guard — if the record already has the target
+        // status, this webhook has already been processed. Return early to
+        // avoid duplicate state transitions and audit entries.
+        if (kycRecord.status === newStatus) {
+          res.status(200).json({ success: true });
+          return;
         }
 
         await prisma.kYCRecord.update({

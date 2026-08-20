@@ -11,6 +11,7 @@ export type KYCDocumentType =
 
 // ── KYC Submission ──────────────────────────────────────────────────────────
 
+/** Options for submitting a KYC verification request. */
 export interface SubmitKYCOptions {
   userId: string;
   firstName: string;
@@ -36,6 +37,7 @@ export interface SubmitKYCOptions {
 
 // ── KYC Status ──────────────────────────────────────────────────────────────
 
+/** Response returned when querying a user's KYC verification status. */
 export interface KYCStatusResponse {
   userId: string;
   kycRecordId: string;
@@ -52,6 +54,7 @@ export interface KYCStatusResponse {
 
 export type AMLScreeningType = 'sanctions' | 'pep' | 'adverse_media' | 'combined';
 
+/** Input parameters for running an AML screening check. */
 export interface AMLCheckInput {
   userId: string;
   firstName: string;
@@ -61,6 +64,7 @@ export interface AMLCheckInput {
   screeningType?: AMLScreeningType;
 }
 
+/** Result of an AML screening check including all matches and risk assessment. */
 export interface AMLCheckResult {
   checkId: string;
   userId: string;
@@ -73,6 +77,7 @@ export interface AMLCheckResult {
   checkedAt: Date;
 }
 
+/** A single match from an AML screening check (sanctions, PEP, or adverse media). */
 export interface AMLMatch {
   listType: 'sanctions' | 'pep' | 'adverse_media';
   matchedName: string;
@@ -84,6 +89,7 @@ export interface AMLMatch {
 
 // ── Sanctions Screening ─────────────────────────────────────────────────────
 
+/** Input for a sanctions-list-specific screening check. */
 export interface SanctionScreeningInput {
   firstName: string;
   lastName: string;
@@ -91,6 +97,7 @@ export interface SanctionScreeningInput {
   dateOfBirth: string;
 }
 
+/** Result of a sanctions-list screening check. */
 export interface SanctionScreeningResult {
   screened: boolean;
   matchFound: boolean;
@@ -100,6 +107,7 @@ export interface SanctionScreeningResult {
 
 // ── Compliance Alert Filter ─────────────────────────────────────────────────
 
+/** Filters for querying compliance alerts. */
 export interface ComplianceAlertFilter {
   status?: 'open' | 'in_review' | 'resolved';
   severity?: 'low' | 'medium' | 'high' | 'critical';
@@ -110,6 +118,7 @@ export interface ComplianceAlertFilter {
 
 // ── Provider Webhook ────────────────────────────────────────────────────────
 
+/** Shape of an inbound webhook event from a KYC/AML provider. */
 export interface ProviderWebhookEvent {
   provider: string;
   eventType: string;
@@ -124,6 +133,7 @@ export interface ProviderWebhookEvent {
 
 // ── Compliance Error ────────────────────────────────────────────────────────
 
+/** Typed error class for compliance-related failures, carrying an error code and HTTP status. */
 export class ComplianceError extends Error {
   public readonly code: string;
   public readonly statusCode: number;

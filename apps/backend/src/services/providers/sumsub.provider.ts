@@ -12,6 +12,7 @@ import { ComplianceError } from '../../types/compliance.types';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
+/** Pluggable interface for KYC provider adapters (Sumsub, Onfido, etc.). */
 export interface KYCProvider {
   createApplicant(input: CreateApplicantInput): Promise<ApplicantResult>;
   uploadDocument(input: UploadDocumentInput): Promise<DocumentUploadResult>;
@@ -25,6 +26,8 @@ export interface CreateApplicantInput {
   lastName: string;
   nationality: string;
   dateOfBirth: string; // YYYY-MM-DD
+  /** KYC level to create the applicant with (maps to Sumsub levelName). */
+  level?: 'BASIC' | 'STANDARD' | 'ENHANCED';
   email?: string;
   metadata?: Record<string, unknown>;
 }
@@ -36,6 +39,7 @@ export interface ApplicantResult {
   reviewStatus: string;
 }
 
+/** Input for uploading a KYC document to the provider. */
 export interface UploadDocumentInput {
   applicantId: string;
   documentType: string;
@@ -46,11 +50,13 @@ export interface UploadDocumentInput {
   mimeType?: string;
 }
 
+/** Result returned after a successful document upload to the provider. */
 export interface DocumentUploadResult {
   documentId: string;
   status: string;
 }
 
+/** Current status of a KYC applicant at the provider. */
 export interface ApplicantStatusResult {
   applicantId: string;
   status: string;
@@ -82,7 +88,7 @@ export class SumsubProvider implements KYCProvider {
   /**
    * Verifies a Sumsub webhook signature.
    * The signature is HMAC-SHA256(timestamp + body) using the secret key.
-   * Rejects on mismatch.
+   * Rejects on mismatch or malformed input (returns false instead of throwing).
    */
   verifyWebhookSignature(timestamp: string, body: string, signature: string): boolean {
     if (!this.secretKey) {
@@ -93,16 +99,29 @@ export class SumsubProvider implements KYCProvider {
       );
     }
 
+    // Guard against malformed hex signatures — timingSafeEqual throws on
+    // length mismatch, which would leak information about the expected
+    // signature length.
+    if (!/^[0-9a-fA-F]+$/.test(signature)) {
+      return false;
+    }
+
     const payload = timestamp + body;
     const expectedSignature = crypto
       .createHmac('sha256', this.secretKey)
       .update(payload, 'utf8')
       .digest('hex');
 
-    return crypto.timingSafeEqual(
-      Buffer.from(signature, 'hex'),
-      Buffer.from(expectedSignature, 'hex')
-    );
+    const sigBuffer = Buffer.from(signature, 'hex');
+    const expectedBuffer = Buffer.from(expectedSignature, 'hex');
+
+    // Both are now hex-decoded. If lengths differ after decode, the
+    // signature is invalid.
+    if (sigBuffer.length !== expectedBuffer.length) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(sigBuffer, expectedBuffer);
   }
 
   // ── Applicant Creation ────────────────────────────────────────────────────
@@ -121,7 +140,19 @@ export class SumsubProvider implements KYCProvider {
       ...(input.metadata ? { metadata: input.metadata } : {}),
     };
 
-    const response = await this.request('POST', '/resources/applicants?levelName=basic-kyc', body);
+    // Map internal KYC level to Sumsub level names
+    const levelNameMap: Record<string, string> = {
+      BASIC: 'basic-kyc',
+      STANDARD: 'default-kyc',
+      ENHANCED: 'enhanced-kyc',
+    };
+    const levelName = levelNameMap[input.level ?? 'BASIC'] ?? 'basic-kyc';
+
+    const response = await this.request(
+      'POST',
+      `/resources/applicants?levelName=${levelName}`,
+      body
+    );
 
     return {
       applicantId: response.id as string,
@@ -187,9 +218,7 @@ export class SumsubProvider implements KYCProvider {
     }
   }
 
-  /**
-   * Signs and sends a JSON request to the Sumsub API.
-   */
+  /** Signs and sends a JSON request to the Sumsub API. */
   private async request(
     method: string,
     path: string,
@@ -227,9 +256,7 @@ export class SumsubProvider implements KYCProvider {
     return data;
   }
 
-  /**
-   * Sends a raw request (e.g. multipart/form-data for document upload).
-   */
+  /** Sends a raw request (e.g. multipart/form-data for document upload). */
   private async requestRaw(
     method: string,
     path: string,
@@ -263,19 +290,13 @@ export class SumsubProvider implements KYCProvider {
     return data;
   }
 
-  /**
-   * Creates the HMAC-SHA256 request signature for Sumsub's API.
-   * Pattern: HMAC-SHA256(secretKey, method + path + timestamp)
-   */
+  /** Creates the HMAC-SHA256 request signature for Sumsub's API. */
   private createRequestSignature(method: string, path: string, timestamp: string): string {
     const payload = method + path + timestamp;
     return crypto.createHmac('sha256', this.secretKey).update(payload).digest('hex');
   }
 
-  /**
-   * Converts a base64 string to a Blob — used for FormData uploads.
-   * Document images are never logged.
-   */
+  /** Converts a base64 string to a Blob for FormData uploads. */
   private base64ToBlob(base64: string, mimeType: string): Blob {
     const binaryString = atob(base64);
     const bytes = new Uint8Array(binaryString.length);
@@ -294,6 +315,7 @@ let providerInstance: KYCProvider | null = null;
  * Returns a singleton SumsubProvider. Instantiate your own if you need a
  * different provider for testing.
  */
+
 export function getKYCProvider(): KYCProvider {
   if (!providerInstance) {
     providerInstance = new SumsubProvider();
@@ -301,7 +323,7 @@ export function getKYCProvider(): KYCProvider {
   return providerInstance;
 }
 
-/** Allow tests to swap the provider singleton. */
+/** Allows tests to replace the singleton provider for isolation. */
 export function setKYCProvider(provider: KYCProvider): void {
   providerInstance = provider;
 }

@@ -307,6 +307,32 @@ describe('ComplianceController', () => {
       // This should succeed since type and applicantId are present
       expect(res._status).toBe(200);
     });
+
+    it('should return 200 without updating when webhook is replayed (same status)', async () => {
+      const prisma = require('../../config/database').default;
+      // Record already has 'approved' status — webhook repeats same event
+      prisma.kYCRecord.findFirst.mockResolvedValue({
+        id: 'kyc-1',
+        userId: 'user-1',
+        providerId: 'app-123',
+        status: 'approved',
+      });
+
+      const req = makeReq({
+        headers: {
+          'x-payload-signature': 'valid-sig',
+          'x-payload-date': '1690000000',
+        },
+        body: { type: 'applicantReview', applicantId: 'app-123', status: 'completed' },
+      });
+      const res = makeRes();
+
+      await ComplianceController.handleWebhook(req, res);
+
+      expect(res._status).toBe(200);
+      // Should NOT have called update since it's a replay
+      expect(prisma.kYCRecord.update).not.toHaveBeenCalled();
+    });
   });
 
   // ── resolveAlert ───────────────────────────────────────────────────────

@@ -36,6 +36,7 @@ const SANCTIONS_COUNTRIES = new Set([
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Maps the Prisma KYCLevel enum to the corresponding string literal union. */
 function mapPrismaLevel(level: PrismaKYCLevel): 'BASIC' | 'STANDARD' | 'ENHANCED' {
   return level;
 }
@@ -133,6 +134,7 @@ export const ComplianceService = {
         lastName: options.lastName,
         nationality: options.nationality,
         dateOfBirth: options.dateOfBirth,
+        level: kycLevel,
       });
 
       // Update the record with the provider's applicant ID

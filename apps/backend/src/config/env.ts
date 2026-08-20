@@ -5,6 +5,7 @@
 // without KYC when the thresholds are unset.
 // ──────────────────────────────────────────────────────────────────────────────
 
+/** Centralised environment configuration read once at import time. */
 export const env = {
   // ── Sumsub KYC Provider ────────────────────────────────────────────────────
   SUMSUB_API_KEY: process.env.SUMSUB_API_KEY ?? '',
