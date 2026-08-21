@@ -29,6 +29,12 @@ enum ComplianceAlertStatus {
   dismissed
 }
 
+enum KYCLevel {
+  BASIC
+  STANDARD
+  ENHANCED
+}
+
 enum JobExecutionStatus {
   pending
   running
@@ -220,25 +226,82 @@ model Transaction {
 
 // KYC records for compliance
 model KYCRecord {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  provider    String   // 'onfido', 'sumsub', etc.
-  providerId  String?  // External provider's ID
-  
-  status      String   @default("pending") // 'pending', 'approved', 'rejected', 'review'
-  
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  level       KYCLevel  @default(BASIC)
+  provider    String    // 'onfido', 'sumsub', etc.
+  providerId  String?   // External provider's ID
+  providerData Json?    // Raw response data from the provider (no PII logged)
+
+  status      String    @default("pending") // 'pending', 'approved', 'rejected', 'review'
+
   documentType String?
   documentNumber String?
-  
+
+  rejectionCode String?  // Provider-specific rejection reason code
+  reviewerId    String?  // Admin user who manually reviewed
+
   metadata        Json?
   reviewedAt  DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
+  // Relations
+  documents    ComplianceDocument[]
+  amlChecks    AMLCheck[]
+
   @@index([userId])
   @@index([status])
+  @@index([level])
+}
+
+// Compliance documents uploaded as part of KYC verification
+model ComplianceDocument {
+  id              String    @id @default(cuid())
+  kycRecordId     String
+  kycRecord       KYCRecord @relation(fields: [kycRecordId], references: [id], onDelete: Cascade)
+
+  documentType    String    // 'passport', 'national_id', 'utility_bill', etc.
+  fileName        String?
+  fileUrl         String?   // Encrypted storage URL — not the raw image
+  mimeType        String?
+  fileSize        Int?
+
+  status          String    @default("uploaded") // 'uploaded', 'verified', 'rejected'
+  rejectionReason String?
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([kycRecordId])
+}
+
+// AML / sanctions / PEP screening checks
+model AMLCheck {
+  id              String    @id @default(cuid())
+  kycRecordId     String
+  kycRecord       KYCRecord @relation(fields: [kycRecordId], references: [id], onDelete: Cascade)
+  userId          String
+
+  screeningType   String    // 'sanctions', 'pep', 'adverse_media', 'combined'
+  matches         Json      @default("[]") // Array of AMLMatch objects
+  riskScore       Int       @default(0)    // 0–100
+  riskLevel       String    @default("low") // 'low', 'medium', 'high', 'critical'
+
+  resolved        Boolean   @default(false)
+  resolvedAt      DateTime?
+  resolvedBy      String?   // Admin userId who resolved
+  resolutionNote  String?
+
+  checkedAt       DateTime  @default(now())
+  createdAt       DateTime  @default(now())
+
+  @@index([userId])
+  @@index([kycRecordId])
+  @@index([riskLevel])
+  @@index([resolved])
 }
 
 // Exchange rates for FX operations
@@ -425,6 +488,7 @@ model ComplianceAlert {
   user            User?                 @relation(fields: [userId], references: [id], onDelete: SetNull)
   transactionId   String?
   transaction     Transaction?          @relation(fields: [transactionId], references: [id], onDelete: SetNull)
+  kycRecordId     String?
   metadata        Json?
   resolvedAt      DateTime?
   resolvedBy      String?
@@ -438,6 +502,7 @@ model ComplianceAlert {
   @@index([userId])
   @@index([transactionId])
   @@index([ruleId])
+  @@index([kycRecordId])
   @@index([createdAt])
 }
 

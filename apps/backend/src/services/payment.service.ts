@@ -10,6 +10,8 @@ import {
 } from '@stellar/stellar-sdk';
 
 import prisma from '../config/database';
+import { env } from '../config/env';
+import { ComplianceError } from '../types/compliance.types';
 import type {
   CreateCrossBorderPaymentOptions,
   PaymentStatus,
@@ -25,6 +27,7 @@ import { WebhookService } from './webhook.service';
 
 const server = StellarService.getHorizonServer();
 
+/** Extracts a human-readable error message from a Stellar Horizon API error response. */
 function getHorizonErrorMessage(error: unknown): string {
   if (error && typeof error === 'object') {
     const errObj = error as Record<string, unknown>;
@@ -49,6 +52,7 @@ function getHorizonErrorMessage(error: unknown): string {
   return String(error);
 }
 
+/** Maps a Prisma Transaction record to the PaymentStatus response shape. */
 function mapToPaymentStatus(tx: Transaction): PaymentStatus {
   return {
     id: tx.id,
@@ -61,6 +65,7 @@ function mapToPaymentStatus(tx: Transaction): PaymentStatus {
   };
 }
 
+/** Writes an audit log entry for payment operations, silently swallowing write failures. */
 async function logAudit(
   userId: string | undefined,
   action: string,
@@ -109,6 +114,69 @@ async function assertPaymentNotComplianceBlocked(
 
 const SANCTIONED_COUNTRIES = ['KP', 'IR', 'SY', 'CU'];
 
+/**
+ * KYC gating helper. Checks whether the user's highest approved KYC level
+ * satisfies the requirements for the given payment amount. Throws
+ * ComplianceError on failure. Payments below the configured threshold always
+ * succeed regardless of KYC status.
+ */
+async function requireKYC(userId: string, amount: string): Promise<void> {
+  const amountNum = parseFloat(amount);
+
+  // Below the threshold — no KYC required
+  if (env.KYC_REQUIRED_THRESHOLD_USD > 0 && amountNum < env.KYC_REQUIRED_THRESHOLD_USD) {
+    return;
+  }
+
+  // No threshold configured — KYC gating disabled
+  if (!env.KYC_REQUIRED_THRESHOLD_USD) {
+    return;
+  }
+
+  // Select the highest-level *approved* KYC record for this user rather than
+  // the most recently updated one. This prevents a stale BASIC record from
+  // overriding a valid ENHANCED approval.
+  const LEVEL_PRIORITY: Record<string, number> = { ENHANCED: 3, STANDARD: 2, BASIC: 1 };
+
+  const approvedRecords = await prisma.kYCRecord.findMany({
+    where: { userId, status: 'approved' },
+  });
+
+  const bestRecord =
+    approvedRecords.sort(
+      (a, b) => (LEVEL_PRIORITY[b.level] ?? 0) - (LEVEL_PRIORITY[a.level] ?? 0)
+    )[0] ?? null;
+
+  if (!bestRecord) {
+    throw new ComplianceError(
+      'KYC verification required for payments >= $' + env.KYC_REQUIRED_THRESHOLD_USD,
+      'KYC_REQUIRED',
+      403
+    );
+  }
+
+  // Enhanced due diligence required for payments >= $10,000
+  if (amountNum >= 10000) {
+    if (bestRecord.level !== 'ENHANCED') {
+      throw new ComplianceError(
+        'Enhanced due diligence (KYC Level ENHANCED) required for payments >= $10,000',
+        'ENHANCED_KYC_REQUIRED',
+        403
+      );
+    }
+  }
+
+  // Standard level required for payments >= $1,000 (when threshold is exactly $1,000)
+  if (amountNum >= 1000 && bestRecord.level === 'BASIC') {
+    throw new ComplianceError(
+      'Standard KYC verification (Level 2) required for payments >= $1,000',
+      'KYC_LEVEL_2_REQUIRED',
+      403
+    );
+  }
+}
+
+/** Checks the beneficiary country against the sanctions list and returns pass/fail. */
 async function performSanctionsScreening(
   beneficiaryCountry?: string
 ): Promise<'passed' | 'failed'> {
@@ -121,6 +189,7 @@ async function performSanctionsScreening(
   return 'passed';
 }
 
+/** Validates that beneficiary info is present for amounts >= $1,000 per the Travel Rule. */
 async function checkTravelRuleCompliance(
   amount: string,
   beneficiaryInfo?: { name: string; country: string }
@@ -135,6 +204,7 @@ async function checkTravelRuleCompliance(
   return 'passed';
 }
 
+/** Runs sanctions screening, Travel Rule validation, and KYC verification in one pass. */
 async function performComplianceChecks(
   userId: string,
   amount: string,
@@ -202,6 +272,9 @@ export const PaymentService = {
     if (wallet.userId !== userId) {
       throw new Error('Wallet does not belong to user');
     }
+
+    // KYC gating — checks threshold-based requirements
+    await requireKYC(userId, options.amount);
 
     const complianceChecks = await performComplianceChecks(
       userId,

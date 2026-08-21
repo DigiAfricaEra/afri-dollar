@@ -5,8 +5,8 @@ import cors from 'cors';
 import { config } from 'dotenv';
 import express, { json, urlencoded } from 'express';
 import helmet from 'helmet';
-import swaggerJsdoc from 'swagger-jsdoc';
-import swaggerUi from 'swagger-ui-express';
+import swaggerJsdoc from 'swagger-jsdoc'; // eslint-disable-line import/no-unresolved
+import swaggerUi from 'swagger-ui-express'; // eslint-disable-line import/no-unresolved
 
 // Express's RequestHandler uses `any` as default generic params, which triggers
 // @typescript-eslint/no-unsafe-argument. This interface provides non-any types.
@@ -19,6 +19,7 @@ import { errorMiddleware } from './middleware/error.middleware';
 import adminRouter from './routes/admin.routes';
 import auditRouter from './routes/audit.routes';
 import authRouter from './routes/auth.routes';
+import { complianceRouter, adminComplianceRouter } from './routes/compliance.routes';
 import fxRouter, { adminFxRouter } from './routes/fx.routes';
 import jobRouter from './routes/job.routes';
 import notificationRouter from './routes/notification.routes';
@@ -122,6 +123,12 @@ app.use('/api/v1/webhooks', webhookRouter as MountableRouter);
 
 // Notification routes
 app.use('/api/v1/notifications', notificationRouter as MountableRouter);
+
+// Compliance routes (user-facing)
+app.use('/api/v1/compliance', complianceRouter as MountableRouter);
+
+// Admin compliance alert resolution routes
+app.use('/api/v1/admin/compliance', adminComplianceRouter as MountableRouter);
 
 // Global error handler
 app.use(errorMiddleware);
