@@ -288,6 +288,7 @@ impl PayrollContract {
             amount,
         });
 
+        batch.recipients = recipients.clone();
         put_batch(&env, &batch);
         put_recipients(&env, batch_id, &recipients);
         extend_persistent_ttl(&env, &DataKey::PayrollBatch(batch_id));
@@ -402,3 +403,6 @@ impl PayrollContract {
         read_batch(&env, batch_id).ok_or(Error::BatchNotFound)
     }
 }
+
+#[cfg(test)]
+mod test;
