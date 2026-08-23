@@ -187,18 +187,22 @@ model Transaction {
   wallet          Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
   
   type            String   // 'deposit', 'withdrawal', 'transfer', 'exchange', 'payroll'
-  status          String   @default("pending") // 'pending', 'completed', 'failed', 'cancelled'
+  status          String   @default("pending") // 'created', 'submitted', 'processing', 'pending', 'completed', 'successful', 'failed', 'cancelled'
   
+  // Stored as a fixed-precision decimal(20,7) string (Stellar stroop precision)
   amount          String
   assetCode       String
   assetIssuer     String?
+  memo            String?
   
   fromAddress     String?
   toAddress       String?
   stellarTxId     String?  @unique
   
   metadata        Json?
+  errorCode       String?  // Structured error code, e.g. INSUFFICIENT_BALANCE
   errorMessage    String?
+  submittedAt     DateTime?
   isFlagged       Boolean  @default(false)
   flagReason      String?
   flaggedAt       DateTime?

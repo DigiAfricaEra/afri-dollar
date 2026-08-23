@@ -1,3 +1,4 @@
+import { StrKey } from '@stellar/stellar-sdk';
 import { z } from 'zod';
 
 import { WEBHOOK_EVENTS } from '../types/webhook.types';
@@ -74,6 +75,102 @@ export const createCrossBorderPaymentSchema = z.object({
 
 export const paymentIdParamSchema = z.object({
   id: z.string().min(1, 'Payment ID is required'),
+});
+
+/** Valid Stellar ed25519 public key (G... address). */
+const stellarAddressSchema = z.string().refine((val) => StrKey.isValidEd25519PublicKey(val), {
+  message: 'Invalid Stellar address',
+});
+
+/** Stellar-compatible amount: up to 7 decimal places (stroop precision). */
+export const stellarAmountSchema = z
+  .string()
+  .regex(/^\d+(\.\d{1,7})?$/, 'Invalid amount format: up to 7 decimal places allowed');
+
+export const createInstantPaymentSchema = z.object({
+  sourceWalletId: z.string().min(1, 'Source wallet ID is required'),
+  destination: stellarAddressSchema,
+  amount: stellarAmountSchema,
+  assetCode: z
+    .string()
+    .min(1)
+    .max(12)
+    .regex(/^[A-Za-z0-9]+$/, 'Invalid asset code'),
+  assetIssuer: stellarAddressSchema.optional(),
+  memo: z.string().max(28, 'Memo must be at most 28 characters').optional(),
+});
+
+/**
+ * Accepts both the instant-payment body (`destination`) and the legacy
+ * cross-border body (`destinationAddress` + `purpose`) on POST /payments.
+ */
+export const createUnifiedPaymentSchema = z.union([
+  createInstantPaymentSchema,
+  createCrossBorderPaymentSchema,
+]);
+
+const transactionStatusFilter = z.enum([
+  'created',
+  'submitted',
+  'processing',
+  'successful',
+  'failed',
+]);
+
+const dateRangeFields = {
+  startDate: z
+    .string()
+    .refine((val) => !isNaN(Date.parse(val)), {
+      message: 'startDate must be a valid date string',
+    })
+    .optional(),
+  endDate: z
+    .string()
+    .refine((val) => !isNaN(Date.parse(val)), {
+      message: 'endDate must be a valid date string',
+    })
+    .optional(),
+};
+
+const dateRangeRefinement = {
+  message: 'startDate must be less than or equal to endDate',
+  path: ['startDate'] as [string],
+};
+
+function datesAreOrdered(startDate?: string, endDate?: string): boolean {
+  if (startDate == null || endDate == null) return true;
+  return new Date(startDate) <= new Date(endDate);
+}
+
+export const listPaymentsQuerySchema = z
+  .object({
+    status: transactionStatusFilter.optional(),
+    walletId: z.string().min(1).optional(),
+    ...dateRangeFields,
+    page: z.coerce.number().int().min(1).optional().default(1),
+    limit: z.coerce.number().int().min(1).max(100).optional().default(20),
+  })
+  .refine(({ startDate, endDate }) => datesAreOrdered(startDate, endDate), dateRangeRefinement);
+
+export const adminBatchPayoutSchema = z.object({
+  sourceWalletId: z.string().min(1, 'Source wallet ID is required').optional(),
+  payouts: z
+    .array(
+      z.object({
+        destination: stellarAddressSchema,
+        amount: stellarAmountSchema,
+        assetCode: z
+          .string()
+          .min(1)
+          .max(12)
+          .regex(/^[A-Za-z0-9]+$/, 'Invalid asset code'),
+        assetIssuer: stellarAddressSchema.optional(),
+        memo: z.string().max(28, 'Memo must be at most 28 characters').optional(),
+        reference: z.string().max(64).optional(),
+      })
+    )
+    .min(1, 'At least one payout is required')
+    .max(100, 'Maximum 100 payouts per batch'),
 });
 
 const reportParametersSchema = z

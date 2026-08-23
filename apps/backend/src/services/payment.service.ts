@@ -18,11 +18,17 @@ import type {
   CrossBorderPaymentResult,
   ComplianceCheckResult,
 } from '../types/payment.types';
+import type { PaymentRecord } from '../types/transaction.types';
 import { decrypt } from '../utils/crypto';
 
 import { NotificationService } from './notification.service';
 import { StellarService } from './stellar.service';
 import { TransactionMonitorService } from './transaction-monitor.service';
+import {
+  TransactionService,
+  assertValidPaymentInputs,
+  mapToPaymentRecord,
+} from './transaction.service';
 import { WebhookService } from './webhook.service';
 
 const server = StellarService.getHorizonServer();
@@ -628,5 +634,116 @@ export const PaymentService = {
     await logAudit(userId, 'payment_cancel', paymentId, true);
 
     return mapToPaymentStatus(updatedTx!);
+  },
+
+  /**
+   * Creates and executes an instant Stellar payment end-to-end
+   * (build → sign → submit → track). Delegates the network work to
+   * TransactionService and applies KYC gating before moving funds.
+   */
+  async createInstantPayment(
+    options: {
+      sourceWalletId: string;
+      destination: string;
+      amount: string;
+      assetCode: string;
+      assetIssuer?: string;
+      memo?: string;
+    },
+    userId: string
+  ): Promise<PaymentRecord> {
+    assertValidPaymentInputs(options);
+
+    await requireKYC(userId, options.amount);
+
+    return TransactionService.buildAndSubmitPayment({
+      sourceWalletId: options.sourceWalletId,
+      userId,
+      destination: options.destination,
+      amount: options.amount,
+      assetCode: options.assetCode,
+      assetIssuer: options.assetIssuer,
+      memo: options.memo,
+    });
+  },
+
+  /**
+   * Lists the user's instant payments with optional status / wallet /
+   * date-range filters and pagination.
+   */
+  async listPayments(
+    userId: string,
+    filters?: {
+      status?: 'created' | 'submitted' | 'processing' | 'successful' | 'failed';
+      walletId?: string;
+      startDate?: string;
+      endDate?: string;
+    },
+    page = 1,
+    limit = 20
+  ): Promise<{ data: PaymentRecord[]; page: number; limit: number; total: number }> {
+    const where: Prisma.TransactionWhereInput = {
+      userId,
+      metadata: {
+        path: ['paymentType'],
+        equals: 'stellar_payment',
+      },
+      ...(filters?.status ? { status: filters.status } : {}),
+      ...(filters?.walletId ? { walletId: filters.walletId } : {}),
+      ...((filters?.startDate || filters?.endDate) && {
+        createdAt: {
+          ...(filters?.startDate ? { gte: new Date(filters.startDate) } : {}),
+          ...(filters?.endDate ? { lte: new Date(filters.endDate) } : {}),
+        },
+      }),
+    };
+
+    const [transactions, total] = await Promise.all([
+      prisma.transaction.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.transaction.count({ where }),
+    ]);
+
+    return {
+      data: transactions.map(mapToPaymentRecord),
+      page,
+      limit,
+      total,
+    };
+  },
+
+  /**
+   * Returns a single instant payment owned by the user, enriched with live
+   * Horizon details when the transaction has been submitted.
+   */
+  async getPaymentDetails(paymentId: string, userId: string): Promise<PaymentRecord> {
+    const transaction = await prisma.transaction.findUnique({
+      where: { id: paymentId },
+    });
+
+    if (!transaction) {
+      throw new Error('Payment not found');
+    }
+    if (transaction.userId !== userId) {
+      throw new Error('Payment not found');
+    }
+
+    // Refresh from Horizon when the outcome is not yet final.
+    if (
+      (transaction.status === 'processing' || transaction.status === 'submitted') &&
+      transaction.stellarTxId
+    ) {
+      await TransactionService.getTransactionStatus(transaction.stellarTxId);
+      const refreshed = await prisma.transaction.findUnique({
+        where: { id: paymentId },
+      });
+      if (refreshed) return mapToPaymentRecord(refreshed);
+    }
+
+    return mapToPaymentRecord(transaction);
   },
 };

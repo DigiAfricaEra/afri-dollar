@@ -14,6 +14,7 @@ import { decrypt } from '../utils/crypto';
 
 import { NotificationService } from './notification.service';
 import { StellarService } from './stellar.service';
+import { TransactionService } from './transaction.service';
 import { WebhookService } from './webhook.service';
 
 export interface CreatePayrollBatchOptions {
@@ -272,6 +273,82 @@ export const PayrollService = {
 
     await logAudit(userId, 'payroll_item_add', batchId, true, { itemId: item.id });
     return mapToPayrollItem(item);
+  },
+
+  /**
+   * Executes a single approved payroll item on Stellar via
+   * TransactionService (build → sign → submit → track). The batch must be
+   * approved or already processing; the item is atomically claimed before
+   * funds move so concurrent workers cannot double-pay.
+   */
+  async payPayrollItem(batchId: string, itemId: string, userId: string): Promise<PayrollItem> {
+    const batch = await assertBatchOwnedByUser(batchId, userId);
+    if (batch.status !== 'approved' && batch.status !== 'processing') {
+      throw new Error('Payroll batch must be approved before items can be paid');
+    }
+
+    const item = await prisma.payrollItem.findFirst({
+      where: { id: itemId, payrollBatchId: batchId },
+    });
+    if (!item) {
+      throw new Error('Payroll item not found');
+    }
+
+    // Atomic claim — only pending/failed items can be paid.
+    const claim = await prisma.payrollItem.updateMany({
+      where: { id: itemId, status: { in: ['pending', 'failed'] } },
+      data: { status: 'processing' },
+    });
+    if (claim.count === 0) {
+      throw new Error('Payroll item cannot be paid in its current state');
+    }
+
+    try {
+      const payment = await TransactionService.buildAndSubmitPayment({
+        sourceWalletId: batch.walletId,
+        userId,
+        destination: item.recipientAddress,
+        amount: item.amount,
+        assetCode: item.assetCode,
+        assetIssuer: item.assetIssuer || undefined,
+        memo: item.memo || undefined,
+      });
+
+      const updated = await prisma.payrollItem.update({
+        where: { id: itemId },
+        data: {
+          status: 'completed',
+          stellarTxId: payment.stellarTxId ?? null,
+          errorMessage: null,
+        },
+      });
+
+      await logAudit(userId, 'payroll_item_paid', batchId, true, {
+        itemId,
+        stellarTxId: payment.stellarTxId,
+        amount: item.amount,
+        assetCode: item.assetCode,
+      });
+
+      return mapToPayrollItem(updated);
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+
+      const failedItem = await prisma.payrollItem
+        .update({
+          where: { id: itemId },
+          data: { status: 'failed', errorMessage: errorMsg.slice(0, 500) },
+        })
+        .catch(() => null);
+
+      await logAudit(userId, 'payroll_item_payment_failed', batchId, false, {
+        itemId,
+        error: errorMsg,
+      }).catch(() => undefined);
+
+      if (!failedItem) return mapToPayrollItem(item);
+      throw error;
+    }
   },
 
   /**

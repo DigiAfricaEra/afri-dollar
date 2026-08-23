@@ -74,10 +74,77 @@ export const PaymentController = {
       const userId = requireUser(req, res);
       if (!userId) return;
 
+      // Instant Stellar payment (POST /payments spec) vs legacy cross-border flow.
+      const body = req.body as Record<string, unknown>;
+      if (body.destination !== undefined && body.sourceWalletId !== undefined) {
+        const result = await PaymentService.createInstantPayment(
+          body as unknown as Parameters<typeof PaymentService.createInstantPayment>[0],
+          userId
+        );
+        res.status(201).json({
+          success: true,
+          data: result,
+        });
+        return;
+      }
+
       const options = req.body as CreateCrossBorderPaymentOptions;
       const result = await PaymentService.createCrossBorderPayment(options, userId);
 
       res.status(201).json({
+        success: true,
+        data: result,
+      });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  async listPayments(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+
+      const query = req.query as unknown as {
+        status?: 'created' | 'submitted' | 'processing' | 'successful' | 'failed';
+        walletId?: string;
+        startDate?: string;
+        endDate?: string;
+        page?: number;
+        limit?: number;
+      };
+
+      const result = await PaymentService.listPayments(
+        userId,
+        {
+          status: query.status,
+          walletId: query.walletId,
+          startDate: query.startDate,
+          endDate: query.endDate,
+        },
+        query.page ?? 1,
+        query.limit ?? 20
+      );
+
+      res.status(200).json({
+        success: true,
+        data: result.data,
+        pagination: { page: result.page, limit: result.limit, total: result.total },
+      });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  async getPaymentDetails(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const userId = requireUser(req, res);
+      if (!userId) return;
+
+      const { id } = paymentIdParamSchema.parse(req.params);
+      const result = await PaymentService.getPaymentDetails(id, userId);
+
+      res.status(200).json({
         success: true,
         data: result,
       });

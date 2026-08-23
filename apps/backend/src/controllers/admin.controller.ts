@@ -1,10 +1,12 @@
 import type { Response } from 'express';
 import { z } from 'zod';
 
+import { env } from '../config/env';
 import type { AuthRequest } from '../middleware/auth.middleware';
 import { AdminService } from '../services/admin.service';
+import { TransactionService } from '../services/transaction.service';
 import { AppError } from '../types';
-import { queryBooleanSchema } from '../utils/validation';
+import { adminBatchPayoutSchema, queryBooleanSchema } from '../utils/validation';
 
 const paginationSchema = z.object({
   page: z.coerce.number().int().positive().default(1),
@@ -248,6 +250,43 @@ export const AdminController = {
       );
 
       res.status(200).json({ success: true, data: transaction });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  /** Force-rebuild + resubmit a failed payment (admin override). */
+  async rebuildTransaction(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const adminUserId = requireUser(req, res);
+      if (!adminUserId) return;
+
+      const { id } = userIdParamSchema.parse(req.params);
+      const result = await TransactionService.rebuildFailedTransaction(id, adminUserId);
+
+      res.status(200).json({ success: true, data: result });
+    } catch (error) {
+      handleError(res, error);
+    }
+  },
+
+  /**
+   * Treasury → hot-wallet batched payouts. Each payout is an independent
+   * Stellar transaction; one failure does not stop the rest.
+   */
+  async batchPayouts(req: AuthRequest, res: Response): Promise<void> {
+    try {
+      const adminUserId = requireUser(req, res);
+      if (!adminUserId) return;
+
+      const body = adminBatchPayoutSchema.parse(req.body);
+      const result = await TransactionService.executeBatchPayouts({
+        sourceWalletId: body.sourceWalletId || env.TREASURY_WALLET_ID,
+        payouts: body.payouts,
+        adminUserId,
+      });
+
+      res.status(202).json({ success: true, data: result });
     } catch (error) {
       handleError(res, error);
     }

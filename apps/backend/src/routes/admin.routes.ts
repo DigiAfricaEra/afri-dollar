@@ -47,6 +47,15 @@ adminRouter.get('/transactions', (req, res, next) => {
   AdminController.listTransactions(req, res).catch(next);
 });
 
+// Batch payouts + rebuild — static paths before /transactions/:id routes
+adminRouter.post('/transactions/rebuild/:id', (req, res, next) => {
+  AdminController.rebuildTransaction(req, res).catch(next);
+});
+
+adminRouter.post('/transactions/batch', (req, res, next) => {
+  AdminController.batchPayouts(req, res).catch(next);
+});
+
 adminRouter.get('/transactions/:id', (req, res, next) => {
   AdminController.getTransaction(req, res).catch(next);
 });

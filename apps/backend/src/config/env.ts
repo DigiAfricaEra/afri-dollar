@@ -24,6 +24,11 @@ export const env = {
   // ── General ────────────────────────────────────────────────────────────────
   ENCRYPTION_KEY: process.env.ENCRYPTION_KEY ?? '',
   JWT_SECRET: process.env.JWT_SECRET ?? '',
+
+  // ── Treasury ───────────────────────────────────────────────────────────────
+  // Wallet used as the default funding source for admin batch payouts when
+  // the request body does not specify one.
+  TREASURY_WALLET_ID: process.env.TREASURY_WALLET_ID ?? '',
 } as const;
 
 export type Env = typeof env;
