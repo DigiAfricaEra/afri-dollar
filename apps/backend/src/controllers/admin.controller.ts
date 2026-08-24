@@ -280,13 +280,24 @@ export const AdminController = {
       if (!adminUserId) return;
 
       const body = adminBatchPayoutSchema.parse(req.body);
+      const sourceWalletId = body.sourceWalletId || env.TREASURY_WALLET_ID;
+      // Defense in depth: the service enforces this too — an admin must not
+      // be able to fund payouts from an arbitrary end-user wallet.
+      if (!sourceWalletId) {
+        throw new AppError(400, 'Source wallet ID is required');
+      }
+      if (body.sourceWalletId && body.sourceWalletId !== env.TREASURY_WALLET_ID) {
+        throw new AppError(403, 'Source wallet must be the configured treasury wallet');
+      }
+
       const result = await TransactionService.executeBatchPayouts({
-        sourceWalletId: body.sourceWalletId || env.TREASURY_WALLET_ID,
+        sourceWalletId,
         payouts: body.payouts,
         adminUserId,
       });
 
-      res.status(202).json({ success: true, data: result });
+      // The batch completes before responding, so 200 (not 202).
+      res.status(200).json({ success: true, data: result });
     } catch (error) {
       handleError(res, error);
     }

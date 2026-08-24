@@ -1,9 +1,17 @@
-import { Horizon, StrKey } from '@stellar/stellar-sdk';
+import { Config, Horizon, StrKey } from '@stellar/stellar-sdk';
 
 import { AppError } from '../types';
 
 const STELLAR_NETWORK = process.env.STELLAR_NETWORK || 'testnet';
 const HORIZON_URL = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
+
+/**
+ * Finite timeout for general Horizon requests (loadAccount, fetchBaseFee,
+ * status lookups). Transaction submission keeps the SDK's own hardcoded
+ * 60-second timeout, independent of this global setting.
+ */
+const HORIZON_REQUEST_TIMEOUT_MS = 15_000;
+Config.setTimeout(HORIZON_REQUEST_TIMEOUT_MS);
 
 const horizonServer = new Horizon.Server(HORIZON_URL);
 

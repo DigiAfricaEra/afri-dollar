@@ -278,8 +278,11 @@ export const PayrollService = {
   /**
    * Executes a single approved payroll item on Stellar via
    * TransactionService (build → sign → submit → track). The batch must be
-   * approved or already processing; the item is atomically claimed before
-   * funds move so concurrent workers cannot double-pay.
+   * approved or already processing; an approved batch is atomically advanced
+   * to `processing` so processPayrollBatch cannot claim it concurrently.
+   * The item is atomically claimed before funds move so concurrent workers
+   * cannot double-pay, and a failed item is only re-paid after Horizon
+   * confirms its previous attempt did not land.
    */
   async payPayrollItem(batchId: string, itemId: string, userId: string): Promise<PayrollItem> {
     const batch = await assertBatchOwnedByUser(batchId, userId);
@@ -287,11 +290,55 @@ export const PayrollService = {
       throw new Error('Payroll batch must be approved before items can be paid');
     }
 
+    // Advance an approved batch to processing (atomic no-op if another
+    // worker already did) so the batch processor cannot double-claim it.
+    await prisma.payrollBatch.updateMany({
+      where: { id: batchId, status: 'approved' },
+      data: { status: 'processing' },
+    });
+
     const item = await prisma.payrollItem.findFirst({
       where: { id: itemId, payrollBatchId: batchId },
     });
     if (!item) {
       throw new Error('Payroll item not found');
+    }
+
+    // A previously failed item may have settled after a submission timeout.
+    // Reconcile any indeterminate prior attempt with Horizon before paying
+    // again — only deterministic failures prove the ledger never changed.
+    if (item.status === 'failed') {
+      const indeterminate = await prisma.transaction.findFirst({
+        where: {
+          metadata: { path: ['payrollItemId'], equals: itemId },
+          status: 'failed',
+          errorCode: { in: ['SUBMISSION_TIMEOUT'] },
+          stellarTxId: { not: null },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (indeterminate?.stellarTxId) {
+        const chain = await TransactionService.getTransactionStatus(indeterminate.stellarTxId);
+        if (chain.status === 'successful') {
+          // The original payment actually landed — mark the item complete
+          // instead of creating a second payment.
+          const recovered = await prisma.payrollItem.update({
+            where: { id: itemId },
+            data: { status: 'completed', stellarTxId: indeterminate.stellarTxId },
+          });
+          await logAudit(userId, 'payroll_item_recovered_on_chain', batchId, true, {
+            itemId,
+            stellarTxId: indeterminate.stellarTxId,
+          });
+          return mapToPayrollItem(recovered);
+        }
+        if (chain.status === 'pending') {
+          throw new Error(
+            'Previous payment attempt is still unresolved on-chain; retry after reconciliation'
+          );
+        }
+        // chain.status === 'failed' → deterministically never landed; safe to retry.
+      }
     }
 
     // Atomic claim — only pending/failed items can be paid.
@@ -312,6 +359,7 @@ export const PayrollService = {
         assetCode: item.assetCode,
         assetIssuer: item.assetIssuer || undefined,
         memo: item.memo || undefined,
+        metadata: { payrollItemId: itemId, payrollBatchId: batchId },
       });
 
       const updated = await prisma.payrollItem.update({
@@ -334,19 +382,22 @@ export const PayrollService = {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
 
-      const failedItem = await prisma.payrollItem
-        .update({
+      // Persist the failure, but never swallow the payment error: the caller
+      // must learn the payment failed even if this write itself breaks.
+      try {
+        await prisma.payrollItem.update({
           where: { id: itemId },
           data: { status: 'failed', errorMessage: errorMsg.slice(0, 500) },
-        })
-        .catch(() => null);
+        });
+      } catch (persistError) {
+        console.error('[PayrollService] Failed to persist payroll item failure:', persistError);
+      }
 
       await logAudit(userId, 'payroll_item_payment_failed', batchId, false, {
         itemId,
         error: errorMsg,
       }).catch(() => undefined);
 
-      if (!failedItem) return mapToPayrollItem(item);
       throw error;
     }
   },

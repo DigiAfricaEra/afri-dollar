@@ -721,14 +721,20 @@ export const PaymentService = {
    * Horizon details when the transaction has been submitted.
    */
   async getPaymentDetails(paymentId: string, userId: string): Promise<PaymentRecord> {
-    const transaction = await prisma.transaction.findUnique({
-      where: { id: paymentId },
+    // Restrict to instant payments only — cross-border transactions are
+    // served by their own endpoints and must not leak through here.
+    const transaction = await prisma.transaction.findFirst({
+      where: {
+        id: paymentId,
+        userId,
+        metadata: {
+          path: ['paymentType'],
+          equals: 'stellar_payment',
+        },
+      },
     });
 
     if (!transaction) {
-      throw new Error('Payment not found');
-    }
-    if (transaction.userId !== userId) {
       throw new Error('Payment not found');
     }
 

@@ -13,6 +13,7 @@ import {
 } from '@stellar/stellar-sdk';
 
 import prisma from '../config/database';
+import { env } from '../config/env';
 import { AppError } from '../types';
 import {
   OP_RESULT_CODE_MAP,
@@ -215,8 +216,8 @@ export function assertValidPaymentInputs(options: {
     }
   }
 
-  if (options.memo !== undefined && options.memo.length > MAX_MEMO_LENGTH) {
-    throw new AppError(400, `Memo must be at most ${MAX_MEMO_LENGTH} characters`);
+  if (options.memo !== undefined && Buffer.byteLength(options.memo, 'utf8') > MAX_MEMO_LENGTH) {
+    throw new AppError(400, `Memo must be at most ${MAX_MEMO_LENGTH} bytes`);
   }
 }
 
@@ -232,14 +233,119 @@ interface XdrOperationResultLike {
   switch(): XdrSwitchName;
   value(): unknown;
 }
+interface XdrOperationResultTrLike extends XdrOperationResultLike {
+  arm?(): string;
+}
 interface XdrTransactionResultLike {
   result(): {
     switch(): XdrSwitchName;
-    results(): XdrOperationResultLike[];
+    results?(): XdrOperationResultLike[];
   };
 }
 
-/** Decodes a base64 `result_xdr` into transaction + per-operation result codes. */
+/**
+ * SDK XDR transaction result names use camelCase while Horizon's
+ * `result_codes.transaction` uses snake_case — normalize so the downstream
+ * TX_RESULT_CODE_MAP lookups work uniformly.
+ */
+const TX_XDR_NAME_TO_HORIZON: Record<string, string> = {
+  txFeeBumpInnerSuccess: 'tx_fee_bump_inner_success',
+  txSuccess: 'tx_success',
+  txFailed: 'tx_failed',
+  txTooEarly: 'tx_too_early',
+  txTooLate: 'tx_too_late',
+  txMissingOperation: 'tx_missing_operation',
+  txBadSeq: 'tx_bad_seq',
+  txBadAuth: 'tx_bad_auth',
+  txInsufficientBalance: 'tx_insufficient_balance',
+  txNoAccount: 'tx_no_account',
+  txInsufficientFee: 'tx_insufficient_fee',
+  txBadAuthExtra: 'tx_bad_auth_extra',
+  txInternalError: 'tx_internal_error',
+  txNotSupported: 'tx_not_supported',
+  txFeeBumpInnerFailed: 'tx_fee_bump_inner_failed',
+  txBadSponsorship: 'tx_bad_sponsorship',
+  txBadMinSeqAgeOrGap: 'tx_bad_min_seq_age_or_gap',
+  txMalformed: 'tx_malformed',
+  txSorobanInvalid: 'tx_soroban_invalid',
+};
+
+/**
+ * Explicit mapping from SDK XDR operation-result code names (e.g.
+ * `paymentUnderfunded` nested inside `opInner`) to the Horizon
+ * `result_codes.operations` strings consumed by OP_RESULT_CODE_MAP.
+ * A generic camel-to-snake conversion is not sufficient (e.g.
+ * paymentSrcNoTrust → op_src_no_trust, not op_payment_src_no_trust).
+ */
+const OP_XDR_NAME_TO_HORIZON: Record<string, string> = {
+  // Generic OperationResultCode values (non-opInner switches)
+  opBadAuth: 'op_bad_auth',
+  opNoAccount: 'op_no_account',
+  opNotSupported: 'op_not_supported',
+  opTooManySubentries: 'op_too_many_subentries',
+  opExceededWorkLimit: 'op_exceeded_work_limit',
+  opTooManySponsoring: 'op_too_many_sponsoring',
+  // CreateAccountResultCode
+  createAccountMalformed: 'op_malformed',
+  createAccountUnderfunded: 'op_underfunded',
+  createAccountLowReserve: 'op_low_reserve',
+  createAccountAlreadyExist: 'op_already_exists',
+  createAccountNeedFlag: 'op_need_flag',
+  // PaymentResultCode
+  paymentMalformed: 'op_malformed',
+  paymentUnderfunded: 'op_underfunded',
+  paymentSrcNoTrust: 'op_src_no_trust',
+  paymentSrcNotAuthorized: 'op_src_not_authorized',
+  paymentNoDestination: 'op_no_destination',
+  paymentNoTrust: 'op_no_trust',
+  paymentNotAuthorized: 'op_not_authorized',
+  paymentLineFull: 'op_line_full',
+  paymentNoIssuer: 'op_no_issuer',
+  // PathPaymentStrictReceiveResultCode / PathPaymentStrictSendResultCode
+  pathPaymentMalformed: 'op_malformed',
+  pathPaymentUnderfunded: 'op_underfunded',
+  pathPaymentSourceNoTrust: 'op_src_no_trust',
+  pathPaymentSourceNotAuthorized: 'op_src_not_authorized',
+  pathPaymentNoTrust: 'op_no_trust',
+  pathPaymentNotAuthorized: 'op_not_authorized',
+  pathPaymentLineFull: 'op_line_full',
+  pathPaymentNoIssuer: 'op_no_issuer',
+  pathPaymentNoDestination: 'op_no_destination',
+  pathPaymentOverSendmax: 'op_over_sendmax',
+  pathPaymentOverSourceMax: 'op_over_source_max',
+  pathPaymentTooFewOffers: 'op_too_few_offers',
+};
+
+function mapOpXdrName(name: string): string {
+  return OP_XDR_NAME_TO_HORIZON[name] ?? name;
+}
+
+/** Extracts the Horizon-style operation result code from one OperationResult. */
+function parseOpResultCode(op: XdrOperationResultLike): string {
+  const outerName = op.switch().name;
+  if (outerName !== 'opInner') {
+    return mapOpXdrName(outerName);
+  }
+  // opInner wraps an OperationResultTr union: arm() is the operation type,
+  // value() is the per-type result union whose switch name is the final code.
+  const inner = op.value() as XdrOperationResultTrLike | null;
+  if (!inner || typeof inner.switch !== 'function') {
+    return outerName;
+  }
+  const trName = inner.switch().name;
+  if (typeof inner.value !== 'function') {
+    return mapOpXdrName(trName);
+  }
+  const code = inner.value() as XdrOperationResultLike | null;
+  const finalName = code && typeof code.switch === 'function' ? code.switch().name : trName;
+  return mapOpXdrName(finalName);
+}
+
+/**
+ * Decodes a base64 `result_xdr` into normalized (Horizon-style) transaction +
+ * per-operation result codes. Handles both `txSuccess` and `txFailed` outer
+ * switches; unknown/malformed input degrades to `{ resultCode: 'unknown' }`.
+ */
 export function parseResultXdr(resultXdr: string): {
   resultCode: string;
   opResultCodes: string[];
@@ -250,24 +356,13 @@ export function parseResultXdr(resultXdr: string): {
       'base64'
     ) as unknown as XdrTransactionResultLike;
     const outer = parsed.result();
-    const resultCode = outer.switch().name;
+    const rawTxName = outer.switch().name;
+    const resultCode = TX_XDR_NAME_TO_HORIZON[rawTxName] ?? rawTxName;
 
     const opResultCodes: string[] = [];
-    if (resultCode === 'txSuccess') {
+    if ((rawTxName === 'txSuccess' || rawTxName === 'txFailed') && outer.results) {
       for (const op of outer.results()) {
-        const outerName = op.switch().name;
-        if (outerName !== 'opInner') {
-          opResultCodes.push(outerName);
-          continue;
-        }
-        const inner = op.value() as XdrOperationResultLike | null;
-        const innerName = inner?.switch().name ?? outerName;
-        if (inner && typeof inner.value === 'function') {
-          const code = inner.value() as XdrOperationResultLike | null;
-          opResultCodes.push(code?.switch().name ?? innerName);
-        } else {
-          opResultCodes.push(innerName);
-        }
+        opResultCodes.push(parseOpResultCode(op));
       }
     }
     return { resultCode, opResultCodes };
@@ -327,7 +422,21 @@ function safeEmitWebhook(
 // DB mappers
 // ──────────────────────────────────────────────────────────────────────────────
 
-const PAYMENT_TERMINAL_STATUSES = ['successful', 'completed', 'failed', 'cancelled'];
+/**
+ * Explicit mapping from persisted Transaction.status values onto the public
+ * PaymentRecord status contract. The compiler rejects any unmapped value,
+ * so legacy statuses can never leak through to API clients.
+ */
+const DB_STATUS_TO_PAYMENT_STATUS: Record<string, PaymentRecord['status']> = {
+  created: 'created',
+  pending: 'created',
+  submitted: 'submitted',
+  processing: 'processing',
+  successful: 'successful',
+  completed: 'successful',
+  failed: 'failed',
+  cancelled: 'failed',
+};
 
 /** Maps a Prisma Transaction row onto the public PaymentRecord shape. */
 export function mapToPaymentRecord(tx: DbTransaction): PaymentRecord {
@@ -340,12 +449,7 @@ export function mapToPaymentRecord(tx: DbTransaction): PaymentRecord {
     ...(tx.assetIssuer ? { assetIssuer: tx.assetIssuer } : {}),
     amount: tx.amount.toString(),
     ...(tx.memo ? { memo: tx.memo } : {}),
-    status: (PAYMENT_TERMINAL_STATUSES.includes(tx.status) ||
-    ['created', 'submitted', 'processing'].includes(tx.status)
-      ? tx.status
-      : tx.status === 'pending'
-        ? 'created'
-        : 'failed') as PaymentRecord['status'],
+    status: DB_STATUS_TO_PAYMENT_STATUS[tx.status] ?? 'failed',
     ...(tx.stellarTxId ? { stellarTxId: tx.stellarTxId } : {}),
     ...(tx.errorCode ? { errorCode: tx.errorCode } : {}),
     ...(tx.errorMessage ? { errorMessage: tx.errorMessage } : {}),
@@ -369,6 +473,14 @@ interface RunPaymentParams {
   assetCode: string;
   assetIssuer?: string;
   memo?: string;
+  /**
+   * Called with the signed transaction hash AFTER signing but BEFORE
+   * submission, so callers can associate the hash with their payment row
+   * and safely reconcile indeterminate (timeout) outcomes later.
+   */
+  onSignedHash?: (hash: string) => Promise<void> | void;
+  /** Called immediately before the envelope is handed to Horizon. */
+  onSubmitAttempted?: () => void;
 }
 
 /**
@@ -386,7 +498,11 @@ async function runPaymentCycle(params: RunPaymentParams): Promise<HorizonApiSubm
   });
 
   const signed = await TransactionService.signTransaction(built.xdr, params.sourceWalletId);
+  if (params.onSignedHash) {
+    await params.onSignedHash(signed.hash);
+  }
 
+  params.onSubmitAttempted?.();
   return TransactionService.submitSignedTransaction(signed.signedXdr);
 }
 
@@ -656,17 +772,25 @@ export const TransactionService = {
       where: { stellarTxId: status.id },
     });
     if (!row) return;
-    if (['successful', 'completed', 'failed', 'cancelled'].includes(row.status)) return;
+
+    // Conditional transition: only one concurrent caller (inline confirmation,
+    // reconcile poller, ...) can win the claim, preventing duplicate
+    // notifications and webhook deliveries.
+    const TERMINAL_STATUSES = ['successful', 'completed', 'failed', 'cancelled'];
 
     if (status.status === 'successful') {
-      const updated = await prisma.transaction.update({
-        where: { id: row.id },
+      const claim = await prisma.transaction.updateMany({
+        where: { id: row.id, status: { notIn: TERMINAL_STATUSES } },
         data: {
           status: 'successful',
           completedAt: status.createdAt ?? new Date(),
           errorMessage: null,
         },
       });
+      if (claim.count === 0) return;
+      const updated = (await prisma.transaction.findUnique({
+        where: { id: row.id },
+      })) as DbTransaction;
 
       await logAudit(row.userId, 'transaction_confirmed', row.id, true, {
         stellarTxId: status.id,
@@ -694,8 +818,8 @@ export const TransactionService = {
 
     if (status.status === 'failed') {
       const errorCode = mapFailureCode(status);
-      const updated = await prisma.transaction.update({
-        where: { id: row.id },
+      const claim = await prisma.transaction.updateMany({
+        where: { id: row.id, status: { notIn: TERMINAL_STATUSES } },
         data: {
           status: 'failed',
           errorCode,
@@ -703,6 +827,10 @@ export const TransactionService = {
           completedAt: status.createdAt ?? new Date(),
         },
       });
+      if (claim.count === 0) return;
+      const updated = (await prisma.transaction.findUnique({
+        where: { id: row.id },
+      })) as DbTransaction;
 
       await logAudit(row.userId, 'transaction_failed_on_chain', row.id, false, {
         stellarTxId: status.id,
@@ -776,7 +904,7 @@ export const TransactionService = {
           memo: options.memo || null,
           fromAddress: wallet.publicKey,
           toAddress: options.destination,
-          metadata: { paymentType: 'stellar_payment' },
+          metadata: { paymentType: 'stellar_payment', ...(options.metadata ?? {}) },
         },
       });
       row = await prisma.transaction.update({
@@ -785,6 +913,7 @@ export const TransactionService = {
       });
     }
 
+    let submitAttempted = false;
     try {
       const response = await runPaymentCycle({
         sourceWalletId: wallet.id,
@@ -794,6 +923,18 @@ export const TransactionService = {
         assetCode: options.assetCode,
         assetIssuer: options.assetIssuer,
         memo: options.memo,
+        // Associate the hash with the payment row BEFORE submission so that
+        // indeterminate outcomes (timeouts) can be reconciled on-chain later
+        // instead of blindly re-paid.
+        onSignedHash: async (hash) => {
+          await prisma.transaction.update({
+            where: { id: row.id },
+            data: { stellarTxId: hash },
+          });
+        },
+        onSubmitAttempted: () => {
+          submitAttempted = true;
+        },
       });
 
       row = await prisma.transaction.update({
@@ -838,7 +979,9 @@ export const TransactionService = {
           status: 'failed',
           errorCode: appError.code ?? 'PAYMENT_FAILED',
           errorMessage: appError.message.slice(0, 500),
-          submittedAt: new Date(),
+          // Only record a submission time when the envelope actually reached
+          // Horizon — build/sign failures never got that far.
+          ...(submitAttempted ? { submittedAt: new Date() } : {}),
         },
       });
 
@@ -883,6 +1026,11 @@ export const TransactionService = {
     if (!wallet) {
       throw new AppError(404, 'Treasury wallet not found');
     }
+    // Batch payouts may only be funded from the configured treasury wallet —
+    // signing with an arbitrary wallet id would let an admin move user funds.
+    if (!env.TREASURY_WALLET_ID || wallet.id !== env.TREASURY_WALLET_ID) {
+      throw new AppError(403, 'Batch payouts must originate from the configured treasury wallet');
+    }
 
     const results: BatchPayoutItemResult[] = [];
 
@@ -916,6 +1064,7 @@ export const TransactionService = {
           },
         });
 
+        let submitAttempted = false;
         try {
           const response = await runPaymentCycle({
             sourceWalletId: wallet.id,
@@ -924,6 +1073,16 @@ export const TransactionService = {
             amount: payout.amount,
             assetCode: payout.assetCode,
             assetIssuer: payout.assetIssuer,
+            memo: payout.memo,
+            onSignedHash: async (hash) => {
+              await prisma.transaction.update({
+                where: { id: row.id },
+                data: { stellarTxId: hash },
+              });
+            },
+            onSubmitAttempted: () => {
+              submitAttempted = true;
+            },
           });
 
           await prisma.transaction.update({
@@ -961,7 +1120,7 @@ export const TransactionService = {
               status: 'failed',
               errorCode: appError.code ?? 'PAYMENT_FAILED',
               errorMessage: appError.message.slice(0, 500),
-              submittedAt: new Date(),
+              ...(submitAttempted ? { submittedAt: new Date() } : {}),
             },
           });
 
@@ -1030,6 +1189,36 @@ export const TransactionService = {
     }
     if (!existing.toAddress) {
       throw new AppError(400, 'Payment has no destination address');
+    }
+
+    // A SUBMISSION_TIMEOUT (or similar indeterminate failure) can leave a
+    // transaction marked failed even though Horizon accepted it. Verify the
+    // original never landed before spending funds again.
+    if (existing.stellarTxId) {
+      const server = StellarService.getHorizonServer();
+      try {
+        const record = (await server
+          .transactions()
+          .transaction(existing.stellarTxId)
+          .call()) as unknown as HorizonApiTxRecord;
+        if (record.successful) {
+          throw new AppError(
+            409,
+            'Payment already settled on-chain; refusing to rebuild to avoid double payment'
+          );
+        }
+        // Found but explicitly failed on-chain → safe to rebuild.
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        const errStatus = (
+          (error as Record<string, unknown> | undefined)?.response as
+            Record<string, unknown> | undefined
+        )?.status;
+        if (errStatus !== 404) {
+          throw new AppError(502, 'Failed to verify original payment on Horizon before rebuild');
+        }
+        // 404: never landed in any ledger → safe to rebuild.
+      }
     }
 
     await logAudit(adminUserId, 'admin_transaction_rebuild_started', existing.id, true, {

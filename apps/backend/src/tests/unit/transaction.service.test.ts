@@ -1,4 +1,4 @@
-/* eslint-disable */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call, @typescript-eslint/unbound-method */
 import {
   Account,
   Keypair,
@@ -6,19 +6,23 @@ import {
   Operation,
   TransactionBuilder,
   Transaction,
-  Asset,
 } from '@stellar/stellar-sdk';
 
 import prisma from '../../config/database';
+import { env } from '../../config/env';
 import { NotificationService } from '../../services/notification.service';
-import { WebhookService } from '../../services/webhook.service';
 import {
   TransactionService,
   assertValidPaymentInputs,
   mapToPaymentRecord,
+  parseResultXdr,
   AMOUNT_REGEX,
 } from '../../services/transaction.service';
+import { WebhookService } from '../../services/webhook.service';
 import { encrypt } from '../../utils/crypto';
+
+/** `env` is `as const`; tests need to point the treasury at the mock wallet. */
+const mutableEnv = env as { TREASURY_WALLET_ID: string };
 
 jest.mock('@stellar/stellar-sdk', () => {
   const original = jest.requireActual('@stellar/stellar-sdk');
@@ -61,6 +65,7 @@ jest.mock('../../config/database', () => {
     transaction: {
       create: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
@@ -99,6 +104,7 @@ const mockWalletFindUnique = prisma.wallet.findUnique as jest.Mock;
 const mockTransactionCreate = prisma.transaction.create as jest.Mock;
 const mockTransactionFindUnique = prisma.transaction.findUnique as jest.Mock;
 const mockTransactionUpdate = prisma.transaction.update as jest.Mock;
+const mockTransactionUpdateMany = prisma.transaction.updateMany as jest.Mock;
 const mockAuditLogCreate = prisma.auditLog.create as jest.Mock;
 const mockNotify = NotificationService.notify as jest.Mock;
 const mockEmitEvent = WebhookService.emitEvent as jest.Mock;
@@ -198,10 +204,24 @@ describe('TransactionService', () => {
       );
     });
 
-    it('rejects memos longer than 28 characters', () => {
+    it('rejects memos longer than 28 bytes', () => {
       expect(() => assertValidPaymentInputs({ ...valid, memo: 'x'.repeat(29) })).toThrow(
         expect.objectContaining({ status: 400 })
       );
+    });
+
+    it('rejects a 28-character memo that exceeds 28 UTF-8 bytes', () => {
+      // 'é' is one UTF-16 code unit but two UTF-8 bytes: String.length says
+      // 28 while Buffer.byteLength says 56 — MEMO_TEXT limits bytes.
+      const memo = 'é'.repeat(28);
+      expect(memo.length).toBe(28);
+      expect(() => assertValidPaymentInputs({ ...valid, memo })).toThrow(
+        expect.objectContaining({ status: 400 })
+      );
+    });
+
+    it('accepts a memo of exactly 28 bytes', () => {
+      expect(() => assertValidPaymentInputs({ ...valid, memo: 'x'.repeat(28) })).not.toThrow();
     });
 
     it('requires an issuer for non-XLM assets', () => {
@@ -245,7 +265,7 @@ describe('TransactionService', () => {
       expect(paymentOp.destination).toBe(destination);
       expect(paymentOp.amount).toBe('25.7500000'); // SDK normalizes to 7 decimals
       expect(parsed.memo.type).toBe(Memo.text('').type);
-      expect((parsed.memo as Memo).value?.toString()).toBe('hello payout');
+      expect(parsed.memo.value?.toString()).toBe('hello payout');
       expect(parsed.timeBounds).toBeDefined();
       const timeoutSeconds =
         Number(parsed.timeBounds!.maxTime) - Number(parsed.timeBounds!.minTime);
@@ -270,8 +290,8 @@ describe('TransactionService', () => {
 
       const parsed = TransactionBuilder.fromXDR(built.xdr, built.networkPassphrase) as Transaction;
       const paymentOp = parsed.operations[0] as Operation.Payment;
-      expect((paymentOp.asset as Asset).getCode()).toBe('USDC');
-      expect((paymentOp.asset as Asset).getIssuer()).toBe(issuerKeypair.publicKey());
+      expect(paymentOp.asset.getCode()).toBe('USDC');
+      expect(paymentOp.asset.getIssuer()).toBe(issuerKeypair.publicKey());
     });
 
     it('maps a 404 account load to WALLET_NOT_FUNDED', async () => {
@@ -409,10 +429,12 @@ describe('TransactionService', () => {
 
       await TransactionService.signTransaction(unsignedXdr, 'wallet-1');
 
-      if (mockAuditLogCreate.mock.calls.length > 0) {
-        const logged = JSON.stringify(mockAuditLogCreate.mock.calls);
-        expect(logged).not.toContain(sourceKeypair.secret());
-      }
+      const logged = JSON.stringify([
+        mockAuditLogCreate.mock.calls,
+        mockNotify.mock.calls,
+        mockEmitEvent.mock.calls,
+      ]);
+      expect(logged).not.toContain(sourceKeypair.secret());
     });
   });
 
@@ -541,7 +563,7 @@ describe('TransactionService', () => {
 
     beforeEach(() => {
       mockTransactionFindUnique.mockResolvedValue(dbRow);
-      mockTransactionUpdate.mockResolvedValue({ ...dbRow, status: 'successful' });
+      mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
     });
 
     it('returns successful and syncs the local row', async () => {
@@ -561,9 +583,14 @@ describe('TransactionService', () => {
       expect(status.feeChargedStroops).toBe('200');
       expect(status.resultXdr).toBe('');
       expect(status.horizonUrl).toContain('/transactions/tx-hash-confirmed');
-      expect(mockTransactionUpdate).toHaveBeenCalledWith(
+      // The transition is claimed conditionally so concurrent pollers cannot
+      // double-fire notifications.
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'payment-row-1' },
+          where: {
+            id: 'payment-row-1',
+            status: { notIn: ['successful', 'completed', 'failed', 'cancelled'] },
+          },
           data: expect.objectContaining({ status: 'successful' }),
         })
       );
@@ -583,11 +610,12 @@ describe('TransactionService', () => {
       const status = await TransactionService.getTransactionStatus('unknown-hash');
 
       expect(status.status).toBe('pending');
-      expect(mockTransactionUpdate).not.toHaveBeenCalled();
+      expect(mockTransactionUpdateMany).not.toHaveBeenCalled();
     });
 
     it('does not overwrite terminal rows', async () => {
       mockTransactionFindUnique.mockResolvedValue({ ...dbRow, status: 'successful' });
+      mockTransactionUpdateMany.mockResolvedValue({ count: 0 });
       mockTxCall.mockResolvedValue({
         id: 'tx-hash-confirmed',
         successful: true,
@@ -597,20 +625,18 @@ describe('TransactionService', () => {
 
       await TransactionService.getTransactionStatus('tx-hash-confirmed');
 
-      expect(mockTransactionUpdate).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+      expect(mockEmitEvent).not.toHaveBeenCalled();
     });
 
     it('persists the mapped error code for on-chain failures', async () => {
-      mockTransactionFindUnique.mockResolvedValue(dbRow);
-      mockTransactionUpdate.mockResolvedValue({ ...dbRow, status: 'failed' });
-
       await TransactionService.syncLocalTransaction({
         id: 'tx-hash-confirmed',
         status: 'failed',
         resultCode: 'tx_too_late',
       });
 
-      expect(mockTransactionUpdate).toHaveBeenCalledWith(
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             status: 'failed',
@@ -622,6 +648,32 @@ describe('TransactionService', () => {
         'user-1',
         'transaction-failed',
         expect.objectContaining({ reason: 'TRANSACTION_EXPIRED' })
+      );
+    });
+
+    it('parses a real failed payment result XDR into Horizon codes and maps INSUFFICIENT_BALANCE', async () => {
+      // Built with the actual SDK: txFailed → opInner → payment → underfunded.
+      const { xdr } = jest.requireActual('@stellar/stellar-sdk');
+      const failedB64 = new xdr.TransactionResult({
+        feeCharged: new xdr.Int64(100),
+        result: xdr.TransactionResultResult.txFailed([
+          xdr.OperationResult.opInner(
+            xdr.OperationResultTr.payment(xdr.PaymentResult.paymentUnderfunded())
+          ),
+        ]),
+        ext: new xdr.TransactionResultExt(0),
+      }).toXDR('base64');
+
+      await TransactionService.syncLocalTransaction({
+        id: 'tx-hash-confirmed',
+        status: 'failed',
+        ...parseResultXdr(failedB64),
+      });
+
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ errorCode: 'INSUFFICIENT_BALANCE' }),
+        })
       );
     });
 
@@ -715,9 +767,11 @@ describe('TransactionService', () => {
       expect(record.status).toBe('processing');
       expect(record.stellarTxId).toBe('tx-hash-123');
 
-      const statuses = mockTransactionUpdate.mock.calls.map(
-        (call: [{ data: Record<string, unknown> }]) => call[0].data.status
-      );
+      // The pre-submission hash association writes stellarTxId without a
+      // status change — filter it out when asserting the transition order.
+      const statuses = mockTransactionUpdate.mock.calls
+        .map((call: [{ data: Record<string, unknown> }]) => call[0].data.status)
+        .filter(Boolean);
       expect(statuses).toEqual(['submitted', 'processing']);
 
       const createData = mockTransactionCreate.mock.calls[0][0].data;
@@ -729,6 +783,18 @@ describe('TransactionService', () => {
           data: expect.objectContaining({ action: 'payment_submitted', success: true }),
         })
       );
+    });
+
+    it('associates the transaction hash with the payment row BEFORE submitting', async () => {
+      await TransactionService.buildAndSubmitPayment(options);
+
+      const hashPersist = mockTransactionUpdate.mock.calls.findIndex(
+        (call: [{ data: { stellarTxId?: string } }]) => Boolean(call[0].data.stellarTxId)
+      );
+      expect(hashPersist).toBeGreaterThanOrEqual(0);
+
+      const submitCall = mockSubmitTransaction.mock.invocationCallOrder[0];
+      expect(mockTransactionUpdate.mock.invocationCallOrder[hashPersist]).toBeLessThan(submitCall);
     });
 
     it('marks the payment failed and persists the exact AppError code on insufficient balance', async () => {
@@ -743,6 +809,8 @@ describe('TransactionService', () => {
       );
       expect(failUpdate).toBeDefined();
       expect(failUpdate![0].data.errorCode).toBe('INSUFFICIENT_BALANCE');
+      // The envelope reached Horizon, so a submission time is recorded.
+      expect(failUpdate![0].data.submittedAt).toBeDefined();
 
       expect(mockNotify).toHaveBeenCalledWith(
         'user-1',
@@ -752,6 +820,21 @@ describe('TransactionService', () => {
       expect(mockEmitEvent).toHaveBeenCalledWith(
         expect.objectContaining({ eventType: 'transaction.failed' })
       );
+    });
+
+    it('does not record submittedAt for failures that never reached Horizon', async () => {
+      mockLoadAccount.mockRejectedValueOnce({ response: { status: 404 } });
+
+      await expect(TransactionService.buildAndSubmitPayment(options)).rejects.toThrow(
+        expect.objectContaining({ code: 'WALLET_NOT_FUNDED' })
+      );
+
+      const failUpdate = mockTransactionUpdate.mock.calls.find(
+        (call: [{ data: Record<string, unknown> }]) => call[0].data.status === 'failed'
+      );
+      expect(failUpdate).toBeDefined();
+      expect(failUpdate![0].data.submittedAt).toBeUndefined();
+      expect(mockSubmitTransaction).not.toHaveBeenCalled();
     });
 
     it('rejects payments from wallets owned by other users', async () => {
@@ -786,11 +869,17 @@ describe('TransactionService', () => {
 
     const payouts = [
       { destination, amount: '1', assetCode: 'XLM' },
-      { destination: Keypair.random().publicKey(), amount: '2', assetCode: 'XLM' },
+      {
+        destination: Keypair.random().publicKey(),
+        amount: '2',
+        assetCode: 'XLM',
+        memo: 'batch-memo',
+      },
       { destination: Keypair.random().publicKey(), amount: '3', assetCode: 'XLM' },
     ];
 
     beforeEach(() => {
+      mutableEnv.TREASURY_WALLET_ID = treasuryWallet.id;
       mockWalletFindUnique.mockImplementation((args: { select?: unknown }) => {
         if (args.select) {
           return Promise.resolve({ id: treasuryWallet.id, secretKeyEncrypted, isActive: true });
@@ -855,6 +944,38 @@ describe('TransactionService', () => {
       expect(mockSubmitTransaction).toHaveBeenCalledTimes(3);
     });
 
+    it('passes the payout memo into the on-chain transaction', async () => {
+      mockSubmitTransaction.mockResolvedValue({
+        hash: 'hash-memo',
+        ledger: 1,
+        successful: true,
+        envelope_xdr: '',
+        result_xdr: '',
+      });
+      const buildSpy = jest.spyOn(TransactionService, 'buildRawPaymentTransaction');
+
+      await TransactionService.executeBatchPayouts({
+        sourceWalletId: 'treasury-wallet',
+        adminUserId: 'admin-user',
+        payouts: [payouts[1]],
+      });
+
+      expect(buildSpy).toHaveBeenCalledWith(expect.objectContaining({ memo: 'batch-memo' }));
+      buildSpy.mockRestore();
+    });
+
+    it('refuses payouts from a wallet other than the configured treasury', async () => {
+      mutableEnv.TREASURY_WALLET_ID = 'the-real-treasury';
+
+      await expect(
+        TransactionService.executeBatchPayouts({
+          sourceWalletId: 'treasury-wallet',
+          adminUserId: 'admin-user',
+          payouts: [payouts[0]],
+        })
+      ).rejects.toThrow(expect.objectContaining({ status: 403 }));
+    });
+
     it('throws when the treasury wallet cannot be found', async () => {
       mockWalletFindUnique.mockReset();
       mockWalletFindUnique.mockResolvedValue(null);
@@ -877,37 +998,164 @@ describe('TransactionService', () => {
         })
       ).rejects.toThrow(expect.objectContaining({ status: 400 }));
     });
+
+    afterEach(() => {
+      mutableEnv.TREASURY_WALLET_ID = '';
+    });
+  });
+
+  describe('rebuildFailedTransaction', () => {
+    const failedRow = {
+      id: 'row-failed',
+      userId: 'user-1',
+      walletId: 'wallet-1',
+      type: 'transfer',
+      status: 'failed',
+      amount: '5',
+      assetCode: 'XLM',
+      assetIssuer: null,
+      memo: null,
+      fromAddress: sourcePublicKey,
+      toAddress: destination,
+      stellarTxId: null,
+      errorCode: 'INSUFFICIENT_BALANCE',
+      errorMessage: 'Stellar transaction failed',
+      submittedAt: new Date(),
+      completedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const walletRow = {
+      id: 'wallet-1',
+      userId: 'user-1',
+      publicKey: sourcePublicKey,
+      secretKeyEncrypted,
+      isActive: true,
+    };
+
+    beforeEach(() => {
+      mockTransactionFindUnique.mockImplementation((args: { where: Record<string, unknown> }) => {
+        if ('stellarTxId' in args.where) {
+          return Promise.resolve(null);
+        }
+        return Promise.resolve({ ...failedRow });
+      });
+      mockWalletFindUnique.mockImplementation((args: { select?: unknown }) => {
+        if (args.select) {
+          return Promise.resolve({ id: walletRow.id, secretKeyEncrypted, isActive: true });
+        }
+        return Promise.resolve(walletRow);
+      });
+      mockTransactionCreate.mockResolvedValue(failedRow);
+      mockTransactionUpdate.mockImplementation((args: { data: Record<string, unknown> }) =>
+        Promise.resolve({ ...failedRow, ...args.data })
+      );
+      mockSubmitTransaction.mockResolvedValue({
+        hash: 'rebuild-hash',
+        ledger: 9,
+        successful: true,
+        envelope_xdr: '',
+        result_xdr: '',
+      });
+      mockTxCall.mockRejectedValue({ response: { status: 404 } });
+    });
+
+    it('rebuilds a failed payment and records the rebuild audit trail', async () => {
+      const record = await TransactionService.rebuildFailedTransaction('row-failed', 'admin-1');
+
+      expect(record.status).toBe('processing');
+      expect(mockAuditLogCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ action: 'admin_transaction_rebuild_started' }),
+        })
+      );
+    });
+
+    it('rejects payments that are not failed', async () => {
+      mockTransactionFindUnique.mockResolvedValue({ ...failedRow, status: 'successful' });
+
+      await expect(
+        TransactionService.rebuildFailedTransaction('row-failed', 'admin-1')
+      ).rejects.toThrow(expect.objectContaining({ status: 400 }));
+    });
+
+    it('refuses to double-pay when the original transaction settled on-chain', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        ...failedRow,
+        stellarTxId: 'settled-hash',
+      });
+      mockTxCall.mockResolvedValue({
+        id: 'settled-hash',
+        successful: true,
+        result_xdr: '',
+      });
+
+      await expect(
+        TransactionService.rebuildFailedTransaction('row-failed', 'admin-1')
+      ).rejects.toThrow(expect.objectContaining({ status: 409 }));
+      expect(mockSubmitTransaction).not.toHaveBeenCalled();
+    });
+
+    it('allows the rebuild when the original never landed on-chain', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        ...failedRow,
+        stellarTxId: 'lost-hash',
+      });
+      mockTxCall.mockRejectedValue({ response: { status: 404 } });
+
+      const record = await TransactionService.rebuildFailedTransaction('row-failed', 'admin-1');
+      expect(record.status).toBe('processing');
+    });
+
+    it('refuses and surfaces a 502 when Horizon cannot be reached for verification', async () => {
+      mockTransactionFindUnique.mockResolvedValue({
+        ...failedRow,
+        stellarTxId: 'unknown-hash',
+      });
+      mockTxCall.mockRejectedValue(new Error('gateway down'));
+
+      await expect(
+        TransactionService.rebuildFailedTransaction('row-failed', 'admin-1')
+      ).rejects.toThrow(expect.objectContaining({ status: 502 }));
+    });
   });
 
   describe('mapToPaymentRecord', () => {
+    const legacyRow = {
+      id: 'r1',
+      userId: 'u1',
+      walletId: 'w1',
+      type: 'transfer',
+      status: 'pending',
+      amount: '1.0000000',
+      assetCode: 'XLM',
+      assetIssuer: null,
+      memo: null,
+      fromAddress: sourcePublicKey,
+      toAddress: destination,
+      stellarTxId: null,
+      errorCode: null,
+      errorMessage: null,
+      submittedAt: null,
+      completedAt: null,
+      isFlagged: false,
+      flagReason: null,
+      flaggedAt: null,
+      flaggedBy: null,
+      flagReviewAction: null,
+      resolvedBy: null,
+      resolvedAt: null,
+      resolutionNote: null,
+      metadata: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
     it('maps legacy pending status onto created and keeps optional fields sparse', () => {
       const now = new Date();
       const record = mapToPaymentRecord({
-        id: 'r1',
-        userId: 'u1',
-        walletId: 'w1',
-        type: 'transfer',
-        status: 'pending',
-        amount: '1.0000000',
-        assetCode: 'XLM',
-        assetIssuer: null,
-        memo: null,
-        fromAddress: sourcePublicKey,
-        toAddress: destination,
-        stellarTxId: null,
-        errorCode: null,
-        errorMessage: null,
-        submittedAt: null,
-        completedAt: null,
-        isFlagged: false,
-        flagReason: null,
-        flaggedAt: null,
-        flaggedBy: null,
-        flagReviewAction: null,
-        resolvedBy: null,
-        resolvedAt: null,
-        resolutionNote: null,
-        metadata: null,
+        ...legacyRow,
         createdAt: now,
         updatedAt: now,
       });
@@ -916,6 +1164,15 @@ describe('TransactionService', () => {
       expect(record.destination).toBe(destination);
       expect(record).not.toHaveProperty('stellarTxId');
       expect(record).not.toHaveProperty('errorCode');
+    });
+
+    it.each([
+      ['completed', 'successful'],
+      ['cancelled', 'failed'],
+      ['pending', 'created'],
+    ])('maps legacy status %s onto contract status %s', (dbStatus, expected) => {
+      const record = mapToPaymentRecord({ ...legacyRow, status: dbStatus });
+      expect(record.status).toBe(expected);
     });
   });
 });

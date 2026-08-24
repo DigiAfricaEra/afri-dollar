@@ -87,6 +87,11 @@ export const stellarAmountSchema = z
   .string()
   .regex(/^\d+(\.\d{1,7})?$/, 'Invalid amount format: up to 7 decimal places allowed');
 
+/** Stellar MEMO_TEXT is limited to 28 bytes, not 28 characters. */
+export const stellarMemoSchema = z.string().refine((val) => Buffer.byteLength(val, 'utf8') <= 28, {
+  message: 'Memo must be at most 28 bytes',
+});
+
 export const createInstantPaymentSchema = z.object({
   sourceWalletId: z.string().min(1, 'Source wallet ID is required'),
   destination: stellarAddressSchema,
@@ -97,7 +102,7 @@ export const createInstantPaymentSchema = z.object({
     .max(12)
     .regex(/^[A-Za-z0-9]+$/, 'Invalid asset code'),
   assetIssuer: stellarAddressSchema.optional(),
-  memo: z.string().max(28, 'Memo must be at most 28 characters').optional(),
+  memo: stellarMemoSchema.optional(),
 });
 
 /**
@@ -111,10 +116,13 @@ export const createUnifiedPaymentSchema = z.union([
 
 const transactionStatusFilter = z.enum([
   'created',
+  'pending',
   'submitted',
   'processing',
   'successful',
+  'completed',
   'failed',
+  'cancelled',
 ]);
 
 const dateRangeFields = {
@@ -165,7 +173,7 @@ export const adminBatchPayoutSchema = z.object({
           .max(12)
           .regex(/^[A-Za-z0-9]+$/, 'Invalid asset code'),
         assetIssuer: stellarAddressSchema.optional(),
-        memo: z.string().max(28, 'Memo must be at most 28 characters').optional(),
+        memo: stellarMemoSchema.optional(),
         reference: z.string().max(64).optional(),
       })
     )

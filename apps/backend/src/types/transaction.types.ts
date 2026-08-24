@@ -16,6 +16,11 @@ export interface BuildPaymentOptions {
    * place instead of creating a new one (used by process/rebuild flows).
    */
   paymentId?: string;
+  /**
+   * Extra key/value pairs merged into the created row's metadata (used to
+   * associate payments with domain entities, e.g. payroll items).
+   */
+  metadata?: Record<string, string>;
 }
 
 /** Status of a transaction as reported by the Stellar Horizon API. */
