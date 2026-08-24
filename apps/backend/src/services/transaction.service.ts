@@ -885,7 +885,15 @@ export const TransactionService = {
       // `submitted`, so two concurrent rebuilds can never both submit.
       const claimed = await prisma.transaction.updateMany({
         where: { id: options.paymentId, status: 'failed' },
-        data: { status: 'submitted', errorCode: null, errorMessage: null },
+        data: {
+          status: 'submitted',
+          errorCode: null,
+          errorMessage: null,
+          // Reset timestamps from the failed attempt so a rebuilt payment
+          // never exposes the old completion/submission times.
+          submittedAt: null,
+          completedAt: null,
+        },
       });
       if (claimed.count === 0) {
         throw new AppError(409, 'Payment cannot be rebuilt in its current state');

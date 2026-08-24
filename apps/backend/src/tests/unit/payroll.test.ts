@@ -719,8 +719,11 @@ describe('PayrollService', () => {
       const dummyAccount = new Account(mockPublicKey, '100');
       mockLoadAccount.mockResolvedValue(dummyAccount);
 
-      // First call (batch) fails
-      mockSubmitTransaction.mockRejectedValueOnce(new Error('Batch failed'));
+      // First call (batch) fails deterministically (Horizon rejected the tx,
+      // so nothing landed and per-item retry is safe)
+      const batchError = new Error('Batch failed') as Error & { response: unknown };
+      batchError.response = { status: 400 };
+      mockSubmitTransaction.mockRejectedValueOnce(batchError);
       // Second call (item 1 single retry) succeeds
       mockSubmitTransaction.mockResolvedValueOnce({ hash: 'tx-single-1' });
       // Third call (item 2 single retry) fails
@@ -744,6 +747,47 @@ describe('PayrollService', () => {
       expect(result.failed).toBe(1);
       expect(result.items[0].status).toBe('completed');
       expect(result.items[1].status).toBe('failed');
+      consoleWarnSpy.mockRestore();
+    });
+
+    it('does not resubmit the chunk after an indeterminate submission failure', async () => {
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchUpdateMany.mockResolvedValue({ count: 1 });
+      mockPayrollBatchUpdate.mockResolvedValue({
+        ...mockBatch,
+        status: 'failed',
+        items: mockBatch.items.map((i: any) => ({ ...i, status: 'failed' })),
+      });
+      mockPayrollItemUpdate.mockImplementation(({ where, data }: any) => ({
+        ...mockBatch.items.find((i: any) => i.id === where.id),
+        ...data,
+      }));
+
+      const dummyAccount = new Account(mockPublicKey, '100');
+      mockLoadAccount.mockResolvedValue(dummyAccount);
+      // Timeout-style rejection: no `response` → outcome unknown on-chain.
+      mockSubmitTransaction.mockRejectedValue(new Error('Network timeout'));
+
+      const result = await PayrollService.processPayrollBatch('batch-123', mockUserId);
+
+      // The chunk is submitted exactly once — never retried blindly.
+      expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+      expect(result.successful).toBe(0);
+      expect(result.failed).toBe(2);
+      // Both items record the attempted hash for later reconciliation.
+      expect(mockPayrollItemUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'item-1' },
+          data: expect.objectContaining({
+            status: 'failed',
+            errorMessage: expect.stringContaining('SUBMISSION_TIMEOUT:'),
+          }),
+        })
+      );
+      const firstCall = mockPayrollItemUpdate.mock.calls[0][0];
+      expect(firstCall.data.stellarTxId).toMatch(/^[0-9a-f]{64}$/);
       consoleWarnSpy.mockRestore();
     });
 

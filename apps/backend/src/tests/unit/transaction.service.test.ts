@@ -1066,6 +1066,13 @@ describe('TransactionService', () => {
       const record = await TransactionService.rebuildFailedTransaction('row-failed', 'admin-1');
 
       expect(record.status).toBe('processing');
+      // Stale attempt metadata must be cleared by the claim.
+      expect(mockTransactionUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'row-failed', status: 'failed' },
+          data: expect.objectContaining({ submittedAt: null, completedAt: null }),
+        })
+      );
       expect(mockAuditLogCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ action: 'admin_transaction_rebuild_started' }),
