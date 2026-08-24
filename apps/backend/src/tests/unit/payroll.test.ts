@@ -59,6 +59,7 @@ jest.mock('../../config/database', () => ({
       create: jest.fn(),
       update: jest.fn(),
       updateMany: jest.fn(),
+      findMany: jest.fn(),
     },
     auditLog: {
       create: jest.fn(),
@@ -76,6 +77,7 @@ const mockPayrollBatchUpdateMany = prisma.payrollBatch.updateMany as jest.Mock;
 const mockPayrollItemCreate = prisma.payrollItem.create as jest.Mock;
 const mockPayrollItemUpdate = prisma.payrollItem.update as jest.Mock;
 const mockPayrollItemUpdateMany = prisma.payrollItem.updateMany as jest.Mock;
+const mockPayrollItemFindMany = prisma.payrollItem.findMany as jest.Mock;
 const mockAuditLogCreate = prisma.auditLog.create as jest.Mock;
 
 describe('PayrollService', () => {
@@ -612,6 +614,15 @@ describe('PayrollService', () => {
           },
         ],
       };
+      // Default: the conditional claim claims every snapshot item.
+      mockPayrollItemFindMany.mockImplementation(({ where }: any) => {
+        const ids = where?.id?.in ?? [];
+        return Promise.resolve(
+          mockBatch.items
+            .filter((i: any) => ids.includes(i.id))
+            .map((i: any) => ({ ...i, status: 'processing' }))
+        );
+      });
     });
 
     it('should throw an error if the batch belongs to another user', async () => {
@@ -816,6 +827,36 @@ describe('PayrollService', () => {
       expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
       expect(result.successful).toBe(0);
       expect(result.failed).toBe(2);
+    });
+
+    it('excludes items completed concurrently between snapshot and claim', async () => {
+      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchUpdateMany.mockResolvedValue({ count: 1 });
+      // The conditional item claim only wins for item-1: payPayrollItem
+      // completed item-2 while this batch run was starting.
+      mockPayrollItemUpdateMany.mockResolvedValue({ count: 1 });
+      mockPayrollItemFindMany.mockResolvedValue([{ ...mockBatch.items[0], status: 'processing' }]);
+      mockPayrollBatchUpdate.mockResolvedValue({
+        ...mockBatch,
+        status: 'completed',
+        items: [{ ...mockBatch.items[0], status: 'completed', stellarTxId: 'tx-hash-1' }],
+      });
+      mockPayrollItemUpdate.mockImplementation(({ where, data }: any) => ({
+        ...mockBatch.items.find((i: any) => i.id === where.id),
+        ...data,
+      }));
+
+      const dummyAccount = new Account(mockPublicKey, '100');
+      mockLoadAccount.mockResolvedValue(dummyAccount);
+      mockSubmitTransaction.mockResolvedValue({ hash: 'tx-hash-1' });
+
+      const result = await PayrollService.processPayrollBatch('batch-123', mockUserId);
+
+      // Only the claimed item is submitted and reported.
+      expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+      expect(result.total).toBe(1);
+      expect(result.successful).toBe(1);
+      expect(result.failed).toBe(0);
     });
 
     it('should throw an error if the batch is already being processed', async () => {

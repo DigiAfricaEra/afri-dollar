@@ -633,15 +633,45 @@ export const PayrollService = {
     const networkPassphrase =
       process.env.STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
-    // Transition all selected items to processing status
+    // Claim the snapshot's still-payable items atomically. The status guard
+    // ensures an item completed concurrently by payPayrollItem is never
+    // reset to `processing` and paid a second time.
     await prisma.payrollItem.updateMany({
-      where: { id: { in: itemsToProcess.map((i) => i.id) } },
+      where: {
+        id: { in: itemsToProcess.map((i) => i.id) },
+        status: { in: ['pending', 'failed'] },
+      },
       data: { status: 'processing' },
     });
 
+    // Re-read the claimed rows so items that were paid concurrently between
+    // the batch snapshot and the claim drop out of execution entirely.
+    const claimedItems = await prisma.payrollItem.findMany({
+      where: { id: { in: itemsToProcess.map((i) => i.id) }, status: 'processing' },
+    });
+
+    if (claimedItems.length === 0) {
+      const updatedBatch = await prisma.payrollBatch.update({
+        where: { id: batchId },
+        data: { status: 'completed' },
+        include: { items: true },
+      });
+      await logAudit(userId, 'payroll_batch_process', batchId, true, {
+        total: 0,
+        successful: 0,
+        failed: 0,
+      });
+      return {
+        total: 0,
+        successful: 0,
+        failed: 0,
+        items: updatedBatch.items.map(mapToPayrollItem),
+      };
+    }
+
     // Group items by Asset (assetCode + assetIssuer) and Memo, as Stellar transaction has 1 memo and 100 operation limits
     const groups: { [key: string]: DbPayrollItem[] } = {};
-    for (const item of itemsToProcess) {
+    for (const item of claimedItems) {
       const assetKey = `${item.assetCode}:${item.assetIssuer || ''}`;
       const memoKey = item.memo || '';
       const groupKey = `${assetKey}::${memoKey}`;
@@ -823,7 +853,7 @@ export const PayrollService = {
     });
 
     const result: ProcessPayrollResult = {
-      total: itemsToProcess.length,
+      total: claimedItems.length,
       successful: successfulItems.length,
       failed: failedItems.length,
       items: updatedBatch.items.map(mapToPayrollItem),
