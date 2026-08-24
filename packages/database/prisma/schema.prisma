@@ -226,6 +226,7 @@ model Transaction {
   @@index([stellarTxId])
   @@index([isFlagged])
   @@index([flagReviewAction])
+  @@index([errorCode])
 }
 
 // KYC records for compliance

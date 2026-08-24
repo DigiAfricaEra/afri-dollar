@@ -1048,6 +1048,7 @@ describe('TransactionService', () => {
         return Promise.resolve(walletRow);
       });
       mockTransactionCreate.mockResolvedValue(failedRow);
+      mockTransactionUpdateMany.mockResolvedValue({ count: 1 });
       mockTransactionUpdate.mockImplementation((args: { data: Record<string, unknown> }) =>
         Promise.resolve({ ...failedRow, ...args.data })
       );
@@ -1078,6 +1079,17 @@ describe('TransactionService', () => {
       await expect(
         TransactionService.rebuildFailedTransaction('row-failed', 'admin-1')
       ).rejects.toThrow(expect.objectContaining({ status: 400 }));
+    });
+
+    it('refuses a concurrent rebuild that lost the conditional claim', async () => {
+      // Another admin's rebuild already moved the row out of `failed`.
+      mockTransactionUpdateMany.mockResolvedValue({ count: 0 });
+      mockSubmitTransaction.mockClear();
+
+      await expect(
+        TransactionService.rebuildFailedTransaction('row-failed', 'admin-1')
+      ).rejects.toThrow(expect.objectContaining({ status: 409 }));
+      expect(mockSubmitTransaction).not.toHaveBeenCalled();
     });
 
     it('refuses to double-pay when the original transaction settled on-chain', async () => {

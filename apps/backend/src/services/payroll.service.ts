@@ -384,14 +384,31 @@ export const PayrollService = {
 
       // Persist the failure, but never swallow the payment error: the caller
       // must learn the payment failed even if this write itself breaks.
-      try {
-        await prisma.payrollItem.update({
-          where: { id: itemId },
-          data: { status: 'failed', errorMessage: errorMsg.slice(0, 500) },
-        });
-      } catch (persistError) {
-        console.error('[PayrollService] Failed to persist payroll item failure:', persistError);
-      }
+      // Retry once — if both writes fail, the item would stay wedged in
+      // `processing` (the claim guard only accepts pending/failed), so a
+      // second attempt is made before giving up and surfacing the error.
+      const persistItemFailure = async (): Promise<void> => {
+        try {
+          await prisma.payrollItem.update({
+            where: { id: itemId },
+            data: { status: 'failed', errorMessage: errorMsg.slice(0, 500) },
+          });
+        } catch (persistError) {
+          console.error('[PayrollService] Failed to persist payroll item failure:', persistError);
+          try {
+            await prisma.payrollItem.update({
+              where: { id: itemId },
+              data: { status: 'failed', errorMessage: errorMsg.slice(0, 500) },
+            });
+          } catch (retryError) {
+            console.error(
+              '[PayrollService] Payroll item remains in processing after failed persistence:',
+              retryError
+            );
+          }
+        }
+      };
+      await persistItemFailure();
 
       await logAudit(userId, 'payroll_item_payment_failed', batchId, false, {
         itemId,

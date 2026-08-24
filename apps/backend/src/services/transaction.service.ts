@@ -881,16 +881,18 @@ export const TransactionService = {
     // created → submitted transition before touching the network.
     let row: DbTransaction;
     if (options.paymentId) {
-      const existing = await prisma.transaction.findUnique({
-        where: { id: options.paymentId },
-      });
-      if (!existing) {
-        throw new AppError(404, 'Payment not found');
-      }
-      row = await prisma.transaction.update({
-        where: { id: options.paymentId },
+      // Conditional re-claim: only a row still in `failed` may transition to
+      // `submitted`, so two concurrent rebuilds can never both submit.
+      const claimed = await prisma.transaction.updateMany({
+        where: { id: options.paymentId, status: 'failed' },
         data: { status: 'submitted', errorCode: null, errorMessage: null },
       });
+      if (claimed.count === 0) {
+        throw new AppError(409, 'Payment cannot be rebuilt in its current state');
+      }
+      row = (await prisma.transaction.findUnique({
+        where: { id: options.paymentId },
+      })) as DbTransaction;
     } else {
       const created = await prisma.transaction.create({
         data: {
