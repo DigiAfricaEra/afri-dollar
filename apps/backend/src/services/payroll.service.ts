@@ -368,7 +368,11 @@ export const PayrollService = {
           // instead of creating a second payment.
           const recovered = await prisma.payrollItem.update({
             where: { id: itemId },
-            data: { status: 'completed', stellarTxId: indeterminate.stellarTxId },
+            data: {
+              status: 'completed',
+              stellarTxId: indeterminate.stellarTxId,
+              errorMessage: null,
+            },
           });
           await logAudit(userId, 'payroll_item_recovered_on_chain', batchId, true, {
             itemId,
@@ -724,8 +728,9 @@ export const PayrollService = {
           // payPayrollItem, which reconciles the hash with Horizon first.
           const responseStatus = (batchError as { response?: { status?: number } } | undefined)
             ?.response?.status;
-          const isIndeterminate =
-            responseStatus === undefined || (responseStatus >= 500 && responseStatus !== 504);
+          // Any network-level failure or 5xx (including 504 gateway timeouts)
+          // leaves the on-chain outcome unknown — treat it as indeterminate.
+          const isIndeterminate = responseStatus === undefined || responseStatus >= 500;
 
           if (isIndeterminate && txHash) {
             for (const item of chunk) {

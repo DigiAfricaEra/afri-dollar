@@ -791,6 +791,33 @@ describe('PayrollService', () => {
       consoleWarnSpy.mockRestore();
     });
 
+    it('treats a Horizon 504 gateway timeout as indeterminate and does not resubmit', async () => {
+      mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
+      mockPayrollBatchUpdateMany.mockResolvedValue({ count: 1 });
+      mockPayrollBatchUpdate.mockResolvedValue({
+        ...mockBatch,
+        status: 'failed',
+        items: mockBatch.items.map((i: any) => ({ ...i, status: 'failed' })),
+      });
+      mockPayrollItemUpdate.mockImplementation(({ where, data }: any) => ({
+        ...mockBatch.items.find((i: any) => i.id === where.id),
+        ...data,
+      }));
+
+      const dummyAccount = new Account(mockPublicKey, '100');
+      mockLoadAccount.mockResolvedValue(dummyAccount);
+      const gatewayTimeout = new Error('Gateway timeout') as Error & { response: unknown };
+      gatewayTimeout.response = { status: 504 };
+      mockSubmitTransaction.mockRejectedValue(gatewayTimeout);
+
+      const result = await PayrollService.processPayrollBatch('batch-123', mockUserId);
+
+      // 504 means the outcome is unknown — the chunk must never be retried.
+      expect(mockSubmitTransaction).toHaveBeenCalledTimes(1);
+      expect(result.successful).toBe(0);
+      expect(result.failed).toBe(2);
+    });
+
     it('should throw an error if the batch is already being processed', async () => {
       mockPayrollBatchFindUnique.mockResolvedValue(mockBatch);
       mockPayrollBatchUpdateMany.mockResolvedValue({ count: 0 }); // simulating batch already processing
