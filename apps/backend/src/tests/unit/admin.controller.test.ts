@@ -28,6 +28,7 @@ jest.mock('../../services/admin.service', () => ({
 }));
 
 const mockListUsers = AdminService.listUsers as jest.Mock;
+const mockListTransactions = AdminService.listTransactions as jest.Mock;
 const mockGetUserById = AdminService.getUserById as jest.Mock;
 const mockUpdateUserStatus = AdminService.updateUserStatus as jest.Mock;
 const mockFlagTransaction = AdminService.flagTransaction as jest.Mock;
@@ -72,6 +73,72 @@ function createAuthRequest(overrides: Partial<AuthRequest> = {}): AuthRequest {
 describe('AdminController', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+  });
+
+  describe('listTransactions (GET /api/v1/admin/transactions)', () => {
+    it('searches platform transactions by user, status, date range and pagination', async () => {
+      const req = createAuthRequest({
+        query: {
+          userId: 'user-42',
+          status: 'successful',
+          startDate: '2026-08-01T00:00:00.000Z',
+          endDate: '2026-08-24T23:59:59.999Z',
+          page: '2',
+          limit: '25',
+        },
+      });
+      const res = createMockResponse();
+      const payload = {
+        data: [{ id: 'tx-1', status: 'successful' }],
+        pagination: { total: 30, page: 2, limit: 25, totalPages: 2 },
+      };
+      mockListTransactions.mockResolvedValue(payload);
+
+      await AdminController.listTransactions(req, res as unknown as Response);
+
+      expect(mockListTransactions).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user-42',
+          status: 'successful',
+          startDate: '2026-08-01T00:00:00.000Z',
+          endDate: '2026-08-24T23:59:59.999Z',
+          page: 2,
+          limit: 25,
+        })
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual({
+        success: true,
+        data: payload.data,
+        pagination: payload.pagination,
+      });
+    });
+
+    it('accepts legacy stored statuses in the status filter', async () => {
+      const req = createAuthRequest({ query: { status: 'completed' } });
+      const res = createMockResponse();
+      mockListTransactions.mockResolvedValue({ data: [], pagination: { total: 0 } });
+
+      await AdminController.listTransactions(req, res as unknown as Response);
+
+      expect(mockListTransactions).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'completed' })
+      );
+      expect(res.statusCode).toBe(200);
+    });
+
+    it('rejects an unsupported status filter with a validation error', async () => {
+      const req = createAuthRequest({ query: { status: 'not-a-status' } });
+      const res = createMockResponse();
+
+      await AdminController.listTransactions(req, res as unknown as Response);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual(
+        expect.objectContaining({ success: false, error: 'Validation error' })
+      );
+      expect(mockListTransactions).not.toHaveBeenCalled();
+    });
   });
 
   it('returns 401 when user is not authenticated', async () => {

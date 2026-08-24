@@ -6,7 +6,11 @@ import type { AuthRequest } from '../middleware/auth.middleware';
 import { AdminService } from '../services/admin.service';
 import { TransactionService } from '../services/transaction.service';
 import { AppError } from '../types';
-import { adminBatchPayoutSchema, queryBooleanSchema } from '../utils/validation';
+import {
+  adminBatchPayoutSchema,
+  queryBooleanSchema,
+  transactionStatusFilter,
+} from '../utils/validation';
 
 const paginationSchema = z.object({
   page: z.coerce.number().int().positive().default(1),
@@ -29,7 +33,9 @@ const updateUserStatusSchema = z.object({
 });
 
 const listTransactionsQuerySchema = paginationSchema.extend({
-  status: z.string().optional(),
+  // Validated against the shared payment-status enum (includes the legacy
+  // pending/completed/cancelled values stored on Transaction rows).
+  status: transactionStatusFilter.optional(),
   type: z.string().optional(),
   userId: z.string().optional(),
   assetCode: z.string().optional(),

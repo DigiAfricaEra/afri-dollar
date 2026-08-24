@@ -114,7 +114,7 @@ export const createUnifiedPaymentSchema = z.union([
   createCrossBorderPaymentSchema,
 ]);
 
-const transactionStatusFilter = z.enum([
+export const transactionStatusFilter = z.enum([
   'created',
   'pending',
   'submitted',
