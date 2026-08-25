@@ -9,6 +9,7 @@ export * from './report.type';
 export * from './admin.types';
 export * from './notification.types';
 export * from './compliance.types';
+export * from './sep.types';
 export * from './transaction.types';
 
 export type RegisterRequest = {

@@ -2,6 +2,7 @@
 module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
+  setupFiles: ['<rootDir>/src/tests/env.setup.ts'],
   testMatch: ['**/tests/unit/**/*.test.ts', '**/tests/integration/**/*.test.ts'],
   moduleNameMapper: {
     '^@afri-dollar/database$': '<rootDir>/../../packages/database/src/index.ts',

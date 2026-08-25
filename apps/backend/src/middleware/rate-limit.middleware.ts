@@ -281,6 +281,19 @@ export const ipRateLimiter = (config: RateLimitConfig): RequestHandler => {
   };
 };
 
+export async function redisSetIfNotExists(
+  key: string,
+  ttlSeconds: number
+): Promise<boolean | null> {
+  const redis = await getRedisClient();
+  if (!redis) {
+    return null;
+  }
+
+  const result = await redis.set(key, '1', { NX: true, EX: ttlSeconds });
+  return result === 'OK';
+}
+
 export const authRateLimiter: RequestHandler = rateLimiter(rateLimits.auth);
 export const sensitiveRateLimiter: RequestHandler = rateLimiter(rateLimits.sensitive);
 export const generalRateLimiter: RequestHandler = rateLimiter(rateLimits.general);

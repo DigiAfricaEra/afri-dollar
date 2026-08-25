@@ -49,4 +49,12 @@ export const jobs: JobDefinition[] = [
     retryAttempts: 2,
     retryDelay: 300000,
   },
+  {
+    name: 'sep24-deposit-watcher',
+    schedule: '* * * * *',
+    handler: 'watchSep24Deposits',
+    priority: 'high',
+    retryAttempts: 2,
+    retryDelay: 15000,
+  },
 ];

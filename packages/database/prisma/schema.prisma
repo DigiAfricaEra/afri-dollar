@@ -106,6 +106,7 @@ model User {
   notifications     Notification[]
   notificationPreference NotificationPreference?
   pushSubscriptions PushSubscription[]
+  sepSessions       SepSession[]
 
   @@index([email])
   @@index([walletAddress])
@@ -611,4 +612,37 @@ model PushSubscription {
 
   @@unique([userId, endpoint])
   @@index([userId])
+}
+
+// SEP-24 interactive deposit/withdrawal session
+model SepSession {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  type        String    // 'deposit' | 'withdraw'
+  asset       String
+  amount      String?
+  stellarTxId String?   @unique
+  externalRef String?
+  status      String    @default("incomplete")
+  metadata    Json?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
+
+  @@index([userId])
+  @@index([status])
+  @@index([stellarTxId])
+  @@index([type, status])
+  @@map("SEPSession")
+}
+
+model SepWatchCursor {
+  id          String   @id
+  pagingToken String
+  updatedAt   DateTime @updatedAt
+
+  @@map("SEPWatchCursor")
 }

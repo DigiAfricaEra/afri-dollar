@@ -317,3 +317,32 @@ export const webhookDeliveryQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
   cursor: z.string().optional(),
 });
+
+export const sep10TokenBodySchema = z.object({
+  transaction: z.string().min(1, 'transaction XDR is required'),
+});
+
+export const sep24InteractiveSchema = z.object({
+  asset_code: z.string().min(1).max(12),
+  asset_issuer: z.string().length(56).optional(),
+  amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, 'Invalid amount format')
+    .optional(),
+  type: z.string().max(64).optional(),
+  account: z.string().length(56).optional(),
+  memo: z.string().max(28).optional(),
+  memo_type: z.string().max(32).optional(),
+  lang: z.string().max(16).optional(),
+});
+
+export const sep24CompleteSchema = z.object({
+  bankName: z.string().max(120).optional(),
+  accountNumber: z.string().max(64).optional(),
+  accountName: z.string().max(120).optional(),
+  routingNumber: z.string().max(64).optional(),
+  amount: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/, 'Invalid amount format')
+    .optional(),
+});

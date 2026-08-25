@@ -27,6 +27,7 @@ import paymentRouter from './routes/payment.routes';
 import payrollRouter from './routes/payroll.routes';
 import reportRouter from './routes/report.routes';
 import securityRouter from './routes/security.routes';
+import stellarSepRouter from './routes/stellar-sep.routes';
 import stellarRouter from './routes/stellar.routes';
 import treasuryRouter from './routes/treasury.routes';
 import walletRouter from './routes/wallet.routes';
@@ -36,6 +37,29 @@ import { reportWorker } from './services/report-worker.service';
 import { webhookDeliveryWorker } from './services/webhook-delivery.worker';
 // Load backend-level .env file
 config({ path: path.resolve(__dirname, '../.env') });
+
+function corsAllowlist(): string[] {
+  const origins = new Set<string>();
+  const configured = [
+    process.env.SEP24_INTERACTIVE_FRONTEND_BASE_URL,
+    process.env.FRONTEND_URL,
+    process.env.CORS_ALLOWED_ORIGINS,
+  ];
+
+  for (const value of configured) {
+    if (value === undefined || value.trim().length === 0) {
+      continue;
+    }
+    for (const origin of value.split(',')) {
+      const trimmed = origin.trim().replace(/\/+$/, '');
+      if (trimmed.length > 0) {
+        origins.add(trimmed);
+      }
+    }
+  }
+
+  return [...origins];
+}
 
 const app = express();
 app.set('trust proxy', true);
@@ -60,7 +84,12 @@ if (process.env.NODE_ENV !== 'production') {
 
 // Middleware
 app.use(helmet());
-app.use(cors());
+app.use(
+  cors({
+    origin: corsAllowlist(),
+    credentials: true,
+  })
+);
 app.use(json());
 app.use(urlencoded({ extended: true }));
 
@@ -129,6 +158,9 @@ app.use('/api/v1/compliance', complianceRouter as MountableRouter);
 
 // Admin compliance alert resolution routes
 app.use('/api/v1/admin/compliance', adminComplianceRouter as MountableRouter);
+
+// SEP-10 / SEP-24 anchor endpoints (home-domain paths, not under /api/v1)
+app.use(stellarSepRouter as MountableRouter);
 
 // Global error handler
 app.use(errorMiddleware);

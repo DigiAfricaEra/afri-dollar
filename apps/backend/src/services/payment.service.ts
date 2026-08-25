@@ -1,16 +1,9 @@
 import { Prisma, Transaction } from '@afri-dollar/database';
-import {
-  Keypair,
-  Networks,
-  Operation,
-  TransactionBuilder,
-  Asset,
-  Memo,
-  StrKey,
-} from '@stellar/stellar-sdk';
+import { Keypair, Operation, TransactionBuilder, Asset, Memo, StrKey } from '@stellar/stellar-sdk';
 
 import prisma from '../config/database';
 import { env } from '../config/env';
+import { getNetworkPassphrase } from '../config/stellar-network';
 import { ComplianceError } from '../types/compliance.types';
 import type {
   CreateCrossBorderPaymentOptions,
@@ -411,6 +404,8 @@ export const PaymentService = {
 
     await assertPaymentNotComplianceBlocked(userId, paymentId, transaction);
 
+    const networkPassphrase = getNetworkPassphrase();
+
     const updateCount = await prisma.transaction.updateMany({
       where: { id: paymentId, status: 'created' },
       data: { status: 'processing' },
@@ -438,8 +433,6 @@ export const PaymentService = {
 
     try {
       const sourceKeypair = Keypair.fromSecret(decryptedSecretKey);
-      const networkPassphrase =
-        process.env.STELLAR_NETWORK === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
       const sourceAccount = await server.loadAccount(sourceKeypair.publicKey());
 

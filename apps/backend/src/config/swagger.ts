@@ -46,6 +46,11 @@ const swaggerOptions: Options = {
       { name: 'Jobs', description: 'Background job monitoring (admin only)' },
       { name: 'Reports', description: 'Report generation and templates' },
       { name: 'Webhooks', description: 'Webhook event subscription and delivery management' },
+      {
+        name: 'SEP-24 Anchor',
+        description:
+          'SEP-10 wallet authentication and SEP-24 interactive deposit and withdrawal interoperability',
+      },
     ],
     components: {
       securitySchemes: {
@@ -76,6 +81,20 @@ const swaggerOptions: Options = {
                 message: { type: 'string' },
               },
             },
+          },
+        },
+        Sep24InteractiveRequest: {
+          type: 'object',
+          required: ['asset_code'],
+          properties: {
+            asset_code: { type: 'string', maxLength: 12, example: 'USDC' },
+            asset_issuer: { type: 'string', minLength: 56, maxLength: 56 },
+            amount: { type: 'string', example: '25.00' },
+            type: { type: 'string', example: 'bank_account' },
+            account: { type: 'string', minLength: 56, maxLength: 56 },
+            memo: { type: 'string', maxLength: 28 },
+            memo_type: { type: 'string' },
+            lang: { type: 'string' },
           },
         },
         Pagination: {
@@ -2829,6 +2848,7 @@ const swaggerOptions: Options = {
                           'payroll.processed',
                           'kyc.approved',
                           'kyc.rejected',
+                          'sep24.transaction.status_update',
                         ],
                       },
                       example: ['transaction.completed'],
@@ -3473,6 +3493,201 @@ const swaggerOptions: Options = {
             '401': { description: 'Unauthorized' },
             '403': { description: 'Admin privileges required' },
             '404': { description: 'Template not found' },
+          },
+        },
+      },
+
+      // ─── SEP-24 Anchor ─────────────────────────────────────────────
+      '/.well-known/stellar.toml': {
+        get: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'Stellar TOML',
+          description:
+            'Public stellar.toml used by wallets to discover SEP-10 and SEP-24 endpoints',
+          operationId: 'getStellarToml',
+          responses: {
+            '200': {
+              description: 'TOML document',
+              content: { 'text/plain': { schema: { type: 'string' } } },
+            },
+          },
+        },
+      },
+      '/auth': {
+        get: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'SEP-10 challenge',
+          description: 'Returns a 5-minute SEP-10 challenge transaction for the client account',
+          operationId: 'getSep10Challenge',
+          parameters: [
+            {
+              name: 'account',
+              in: 'query',
+              required: true,
+              schema: { type: 'string' },
+              description: 'Stellar account to authenticate',
+            },
+            {
+              name: 'home_domain',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+            },
+            {
+              name: 'web_auth_domain',
+              in: 'query',
+              required: false,
+              schema: { type: 'string' },
+              description: 'Must match this anchor web_auth_domain when provided',
+            },
+          ],
+          responses: {
+            '200': {
+              description: 'Challenge transaction',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      transaction: { type: 'string' },
+                      network_passphrase: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+            '400': { description: 'Invalid account' },
+          },
+        },
+        post: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'SEP-10 verify',
+          description: 'Verifies a signed challenge and issues a 24-hour SEP-24 JWT',
+          operationId: 'verifySep10Challenge',
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  required: ['transaction'],
+                  properties: { transaction: { type: 'string' } },
+                },
+              },
+            },
+          },
+          responses: {
+            '200': {
+              description: 'SEP-10 JWT',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: { token: { type: 'string' } },
+                  },
+                },
+              },
+            },
+            '401': { description: 'Invalid signatures' },
+          },
+        },
+      },
+      '/sep24/info': {
+        get: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'SEP-24 info',
+          description: 'Lists supported deposit and withdrawal assets, methods, and limits',
+          operationId: 'getSep24Info',
+          responses: {
+            '200': { description: 'Anchor capability document' },
+          },
+        },
+      },
+      '/sep24/transactions/deposit/interactive': {
+        post: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'Start interactive deposit',
+          description:
+            'Creates a SEP-24 deposit session and returns an interactive URL. Requires a SEP-10 JWT.',
+          operationId: 'startSep24Deposit',
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/Sep24InteractiveRequest' },
+              },
+              'application/x-www-form-urlencoded': {
+                schema: { $ref: '#/components/schemas/Sep24InteractiveRequest' },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Interactive deposit URL' },
+            '400': { description: 'Invalid request' },
+            '401': { description: 'Missing or invalid SEP-10 token' },
+            '403': { description: 'Insufficient permissions' },
+          },
+        },
+      },
+      '/sep24/transactions/withdraw/interactive': {
+        post: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'Start interactive withdrawal',
+          description:
+            'Creates a SEP-24 withdrawal session and returns an interactive URL. Requires a SEP-10 JWT.',
+          operationId: 'startSep24Withdraw',
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              'application/json': {
+                schema: { $ref: '#/components/schemas/Sep24InteractiveRequest' },
+              },
+              'application/x-www-form-urlencoded': {
+                schema: { $ref: '#/components/schemas/Sep24InteractiveRequest' },
+              },
+            },
+          },
+          responses: {
+            '200': { description: 'Interactive withdrawal URL' },
+            '400': { description: 'Invalid request' },
+            '401': { description: 'Missing or invalid SEP-10 token' },
+            '403': { description: 'Insufficient permissions' },
+          },
+        },
+      },
+      '/sep24/transaction': {
+        get: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'Get SEP-24 transaction',
+          operationId: 'getSep24Transaction',
+          security: [{ bearerAuth: [] }],
+          parameters: [
+            {
+              name: 'id',
+              in: 'query',
+              required: true,
+              schema: { type: 'string' },
+            },
+          ],
+          responses: {
+            '200': { description: 'Transaction' },
+            '401': { description: 'Unauthorized' },
+            '404': { description: 'Not found' },
+          },
+        },
+      },
+      '/sep24/transactions': {
+        get: {
+          tags: ['SEP-24 Anchor'],
+          summary: 'List SEP-24 transactions',
+          operationId: 'listSep24Transactions',
+          security: [{ bearerAuth: [] }],
+          responses: {
+            '200': { description: 'Transactions' },
+            '401': { description: 'Unauthorized' },
+            '403': { description: 'Insufficient permissions' },
           },
         },
       },
